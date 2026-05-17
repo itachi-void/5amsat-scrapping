@@ -66,7 +66,7 @@ FREE_PROXY_FILES = [
     "SOCKS5 - 2.txt",
 ]  # بروكسيات مجانية بدون يوزر وباسورد
 
-CHECK_INTERVAL = 45 
+CHECK_INTERVAL = 15
 SEEN_FILE        = "khamsat_max_id.json"
 SUBSCRIBERS_FILE = "subscribers.json"
 PENDING_FILE     = "pending_subscribers.json"
@@ -86,7 +86,11 @@ RATE_LIMIT_SECONDS = 3   # حد أدنى بين أوامر المستخدم
 # Project cache
 _projects_cache: list = []
 _projects_cache_ts: float = 0
-PROJECTS_CACHE_TTL = 30   # ثانية
+PROJECTS_CACHE_TTL = 10   # ثانية (تم تقليله مع تقليل الـ interval)
+
+# Backoff State
+backoff_until = 0
+deep_scan_counter = 0
 
 # وقت تشغيل البوت
 bot_start_time = time.time()
@@ -96,9 +100,12 @@ USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 OPR/109.0.0.0",
 ]
 
-IMPERSONATE_TARGETS = ["chrome110", "chrome116", "chrome120", "chrome123", "chrome124"]
+IMPERSONATE_TARGETS = ["chrome110", "chrome116", "chrome120", "chrome123", "chrome124", "safari15_3", "safari17_0", "edge101"]
 
 def _new_scraper():
     """Create a fresh scraper session with random browser fingerprint."""
@@ -436,11 +443,15 @@ def get_proxy_url(use_premium=True):
 
 def _fetch_one_page(page_url, headers, proxies=None, proxy_kind="direct", p_addr=None):
     """Fetch and extract requests from a single Khamsat page."""
-    global scraper
+    global scraper, backoff_until
     try:
         resp = scraper.get(page_url, headers=headers, proxies=proxies or {}, timeout=15)
         if resp.status_code == 200:
             return extract_projects(resp.text)
+        elif resp.status_code in (429, 403):
+            logger.error(f"Khamsat returned {resp.status_code}. Backing off for 5 minutes.")
+            backoff_until = time.time() + 300
+            _notify_admins(f"⚠️ تحذير: الموقع قام بحظر الطلبات مؤقتاً (Error {resp.status_code}). تم إيقاف الفحص لمدة 5 دقائق.")
     except Exception as e:
         logger.warning(f"Fetch error ({proxy_kind} {p_addr}): {e}")
     return None
@@ -1359,9 +1370,15 @@ def _save_max_id(max_id):
 
 def check_khamsat():
     """فحص طلبات جديدة على موقع خمسات — يعتمد على أعلى ID رقمي شوفناه"""
-    global max_seen_id, premium_proxies, free_proxies
+    global max_seen_id, premium_proxies, free_proxies, backoff_until, deep_scan_counter
 
-    projects, proxy_type, p_addr = fetch_mostaql_projects()
+    if time.time() < backoff_until:
+        return
+
+    deep_scan_counter += 1
+    # إجراء مسح عميق (8 صفحات) كل 20 مرة (يعني حوالي كل 5 دقايق لو الديلي 15ث)، غير كده مسح سريع (صفحة واحدة)
+    pages_to_fetch = 8 if deep_scan_counter % 20 == 0 else 1
+    projects, proxy_type, p_addr = fetch_mostaql_projects(max_pages=pages_to_fetch)
     if not projects:
         return
 
@@ -1497,6 +1514,7 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Main loop error: {str(e)}")
 
-        wait = CHECK_INTERVAL + random.randint(5, 15)
-        logger.info(f"Waiting {wait}s before the next scan")
+        # Jitter: sleep randomly to avoid detection
+        wait = CHECK_INTERVAL + random.uniform(2.0, 6.0)
+        logger.info(f"Waiting {wait:.1f}s before the next scan")
         time.sleep(wait)
