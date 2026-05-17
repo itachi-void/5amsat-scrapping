@@ -61,6 +61,7 @@ PROXY_USER = os.getenv("PROXY_USER", "")
 PROXY_PASS = os.getenv("PROXY_PASS", "")
 PREMIUM_PROXY_FILE = "proxyscrape_premium_http_proxies.txt"
 FREE_PROXY_FILES = [
+    "free_proxies.txt",
     "HTTP - 2.txt",
     "SOCKS4 - 2.txt",
     "SOCKS5 - 2.txt",
@@ -418,7 +419,15 @@ def load_proxies():
 
         try:
             with open(proxy_file, 'r') as f:
-                loaded_proxies = [(scheme, l.strip()) for l in f if ":" in l]
+                loaded_proxies = []
+                for l in f:
+                    l = l.strip()
+                    if ":" in l:
+                        if "://" in l:
+                            parts = l.split("://", 1)
+                            loaded_proxies.append((parts[0].lower(), parts[1]))
+                        else:
+                            loaded_proxies.append((scheme, l))
                 free_proxies.extend(loaded_proxies)
             logger.info(f"Loaded {len(loaded_proxies)} proxies from {proxy_file} without username/password")
         except Exception as e:
@@ -471,45 +480,55 @@ def fetch_mostaql_projects(max_pages=8, max_attempts=12):
     all_proxies = list(premium_proxies) + list(free_proxies)
     random.shuffle(all_proxies)
 
-    chosen_proxies = None
-    proxy_kind = "direct"
-    p_addr = None
+    proxy_idx = 0
+    def get_next_proxy():
+        nonlocal proxy_idx
+        while proxy_idx < len(all_proxies) and proxy_idx < max_attempts:
+            scheme, addr = all_proxies[proxy_idx]
+            proxy_idx += 1
+            if PROXY_USER and PROXY_PASS and (scheme, addr) in premium_proxies:
+                pu = f"{scheme}://{PROXY_USER}:{PROXY_PASS}@{addr}"
+                pk = "premium"
+            else:
+                pu = f"{scheme}://{addr}"
+                pk = "free"
+            return {"http": pu, "https": pu}, pk, addr
+        return None, "direct", None
 
-    for scheme, addr in all_proxies[:max_attempts]:
-        if PROXY_USER and PROXY_PASS and (scheme, addr) in premium_proxies:
-            pu = f"{scheme}://{PROXY_USER}:{PROXY_PASS}@{addr}"
-            pk = "premium"
-        else:
-            pu = f"{scheme}://{addr}"
-            pk = "free"
-        pg1 = _fetch_one_page(URL, headers, {"http": pu, "https": pu}, pk, addr)
-        if pg1 is not None:
-            chosen_proxies = {"http": pu, "https": pu}
-            proxy_kind = pk
-            p_addr = addr
-            break
-
-    if chosen_proxies is None:
-        scraper = _new_scraper()
-        pg1 = _fetch_one_page(URL, headers)
-        if pg1 is None:
-            return [], None, None
+    chosen_proxies, proxy_kind, p_addr = get_next_proxy()
 
     # Collect pages
-    all_items: list = pg1 or []
-    seen_in_fetch: set = {p["id"] for p in all_items}
+    all_items: list = []
+    seen_in_fetch: set = set()
 
-    for page_num in range(2, max_pages + 1):
+    for page_num in range(1, max_pages + 1):
         if len(all_items) >= 200:
             break
-        page_url = f"{URL}?page={page_num}"
-        items = _fetch_one_page(page_url, headers, chosen_proxies, proxy_kind, p_addr)
+        page_url = f"{URL}?page={page_num}" if page_num > 1 else URL
+        
+        items = None
+        while items is None:
+            if chosen_proxies is None:
+                scraper = _new_scraper()
+                items = _fetch_one_page(page_url, headers)
+                if items is None:
+                    break
+            else:
+                items = _fetch_one_page(page_url, headers, chosen_proxies, proxy_kind, p_addr)
+                if items is None:
+                    # Proxy failed, try next immediately
+                    chosen_proxies, proxy_kind, p_addr = get_next_proxy()
+                    if chosen_proxies is None:
+                        pass
+                        
         if not items:
             break
+            
         for item in items:
             if item["id"] not in seen_in_fetch:
                 seen_in_fetch.add(item["id"])
                 all_items.append(item)
+                
         time.sleep(0.5)  # polite pause between pages
 
     all_items = all_items[:200]
@@ -1419,7 +1438,7 @@ def send_startup_snapshot(projects):
         return send_telegram("🚀 تم التشغيل، لكن لم يتم العثور على طلبات حالياً.")
 
     sample_count = min(5, len(projects))
-    lines = [f"🚀 تم التشغيل بنجاح.", f"📊 أعلى ID طلب موجود: {max_seen_id}", "", f"أحدث {sample_count} طلبات شوفناها:"]
+    lines = [f"🚀 تم التشغيل بنجاح.", "", f"أحدث {sample_count} طلبات شوفناها:"]
     for project in sorted(projects, key=lambda p: int(p['id']) if p['id'].isdigit() else 0, reverse=True)[:sample_count]:
         lines.append(f"- {project['title']}\n  {project['link']}")
 
@@ -1514,7 +1533,7 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Main loop error: {str(e)}")
 
-        # Jitter: sleep randomly to avoid detection
-        wait = CHECK_INTERVAL + random.uniform(2.0, 6.0)
+        # Jitter: sleep randomly to avoid detection (at most 15s)
+        wait = random.uniform(5.0, 15.0)
         logger.info(f"Waiting {wait:.1f}s before the next scan")
         time.sleep(wait)
