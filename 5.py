@@ -11,101 +11,96 @@ from bs4 import BeautifulSoup
 
 # Sync Locks and Shared Objects
 subscribers_lock = threading.Lock()
-                elif cmd == "/help":
-                    # Dynamic help generator: build sections from cmd_roles and a short descriptions map
-                    command_descriptions = {
-                        "/add_admin": "إضافة أدمن جديد للبوت (Owner only)",
-                        "/remove_admin": "إزالة أدمن من القائمة (Owner only)",
-                        "/backup": "أخذ نسخة احتياطية يدوياً",
-                        "/restore": "استعادة البيانات من ملف باك أب (Admins)",
-                        "/freeze_backup": "تجميد الباك أب التلقائي مؤقتاً",
-                        "/backup_freeze": "بديل لأمر تجميد الباك أب",
-                        "/backup_stop": "إيقاف الباك أب التلقائي",
-                        "/backup_end": "انتهاء الباك أب (تجميد نهائي)",
-                        "/resume_backup": "تشغيل الباك أب التلقائي",
-                        "/backup_resume": "بديل لأمر تشغيل الباك أب",
-                        "/backup_play": "تشغيل الباك أب التلقائي (بديل)",
-                        "/backup_menu": "فتح لوحة إعدادات الباك أب",
-                        "/telegraph_freeze": "تجميد مزامنة Telegraph مؤقتاً",
-                        "/telegraph_stop": "إيقاف مزامنة Telegraph",
-                        "/telegraph_end": "إيقاف مزامنة Telegraph نهائياً",
-                        "/telegraph_resume": "استئناف مزامنة Telegraph",
-                        "/telegraph_play": "بديل لأمر تشغيل مزامنة Telegraph",
-                        "/menu": "فتح لوحة تحكم الأدمن التفاعلية",
-                        "/ids": "عرض معرفات المشتركين المسجلين",
-                        "/broadcast": "بث رسالة إلى جميع المشتركين (Admins)",
-                        "/send_last": "جلب وإرسال أحدث الطلبات يدوياً (Admins)",
-                        "/block": "حظر مستخدم من استخدام البوت (Admins)",
-                        "/unblock": "إلغاء حظر مستخدم (Admins)",
-                        "/mute": "كتم إشعارات مستخدم معين",
-                        "/unmute": "إلغاء كتم مستخدم",
-                        "/muteall": "كتم إشعارات جميع المشتركين",
-                        "/unmuteall": "إلغاء كتم الكل",
-                        "/approve": "قبول طلب اشتراك معلق",
-                        "/reject": "رفض طلب اشتراك معلق",
-                        "/pending": "عرض قائمة الطلبات المعلقة",
-                        "/status": "عرض حالة البوت والإحصائيات",
-                        "/dashboard": "فتح لوحة تقارير بصرية",
-                        "/vstatus": "بديل لأمر لوحة التقارير",
-                        "/start": "الاشتراك في إشعارات البوت",
-                        "/subscribe": "الاشتراك في إشعارات البوت",
-                        "/unsubscribe": "إلغاء الاشتراك من البوت",
-                        "/mymute": "كتم إشعارات الطلبات لحسابك",
-                        "/pause": "كتم مؤقت لإشعاراتك",
-                        "/myunmute": "إلغاء كتم حسابك",
-                        "/resume": "إلغاء كتم واستئناف الإشعارات",
-                        "/ping": "فحص استجابة البوت",
-                        "/help": "عرض هذه القائمة المساعدة",
-                        "/filter": "تصفية الطلبات حسب كلمات مفتاحية",
-                        "/myfilters": "عرض كلماتك المفتاحية الحالية",
-                        "/filter_clear": "مسح فلاتر المستخدم",
-                        "/filter_off": "إيقاف الفلترة واستلام كل الطلبات",
-                    }
+max_seen_id_lock = threading.Lock()
 
-                    # Group commands by required role using the existing cmd_roles mapping
-                    owner_cmds = []
-                    admin_cmds = []
-                    user_cmds = []
-                    for c, r in cmd_roles.items():
-                        if r >= 3:
-                            owner_cmds.append(c)
-                        elif r == 2:
-                            admin_cmds.append(c)
-                        else:
-                            user_cmds.append(c)
+MAX_SUBSCRIBERS = 50
 
-                    def fmt_list(cmds):
-                        lines = []
-                        for c in sorted(cmds):
-                            desc = command_descriptions.get(c, "شرح غير متوفر")
-                            lines.append(f"  {c} — {desc}")
-                        return "\n".join(lines)
+# Rate limiting map: {chat_id: last_msg_timestamp}
+_rate_limit_map = {}
+_RATE_LIMIT_SECONDS = 3
 
-                    if role >= 3:
-                        help_text = (
-                            "🤖 **دليل أوامر البوت الكامل:**\n\n"
-                            "👑 أوامر المالك (Owner Only):\n"
-                            + fmt_list(owner_cmds)
-                            + "\n\n👮 أوامر الأدمنز والأشراف (Admins & Owner):\n"
-                            + fmt_list(admin_cmds)
-                            + "\n\n👤 أوامر المشتركين (Users):\n"
-                            + fmt_list(user_cmds)
-                        )
-                    elif role >= 2:
-                        help_text = (
-                            "🤖 **دليل أوامر الأدمن:**\n\n"
-                            "👮 أوامر الأدمنز (Admin):\n"
-                            + fmt_list(admin_cmds)
-                            + "\n\n👤 أوامر المشتركين (Users):\n"
-                            + fmt_list(user_cmds)
-                        )
-                    else:
-                        help_text = (
-                            "🤖 **دليل أوامر المشتركين:**\n\n"
-                            + fmt_list(user_cmds)
-                        )
+# Project cache
+_khamsat_project_cache = {"data": [], "ts": 0}
+KHAMSAT_CACHE_TTL = 20
 
-                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"})
+# Backoff state
+backoff_until_khamsat = 0
+deep_scan_counter_khamsat = 0
+_proxy_cooldowns = {}       # {proxy_addr: until_timestamp}
+_proxy_fail_streak = {}     # {proxy_addr: consecutive_failures}
+_last_block_alert_ts = 0
+
+REQUEST_RETRY_ATTEMPTS = 3
+PROXY_BACKOFF_BASE_SECONDS = 1.0
+PROXY_BLOCK_BASE_SECONDS = 6.0
+PROXY_MAX_BACKOFF_SECONDS = 60.0
+
+# Uptime baseline
+bot_start_time = time.time()
+
+# Configurations & Tokens (Auto-loaded from .env)
+KHAMSAT_BOT_TOKEN = None
+TELEGRAPH_TOKEN_KHAMSAT = "2182ffe6168f99027ca825ef33d364abc37cede07f0286aef1b9f993d791"
+TELEGRAPH_PATH_KHAMSAT = "DB-05-17"
+
+PROXY_USER = ""
+PROXY_PASS = ""
+
+DATA_DIR = os.getenv("DATA_DIR", ".")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+# Logger Setup (Console + rotating file)
+_log_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_log_formatter)
+try:
+    log_file_path = os.path.join(DATA_DIR, 'unified_bot.log')
+    _fh = RotatingFileHandler(log_file_path, maxBytes=2*1024*1024, backupCount=3, encoding='utf-8')
+    _fh.setFormatter(_log_formatter)
+    logger.addHandler(_fh)
+except Exception:
+    pass
+logger.addHandler(_console_handler)
+logging.getLogger().addHandler(_console_handler)
+
+premium_proxies = []  # [(scheme, addr)]
+free_proxies = []     # [(scheme, addr)]
+
+backup_active = True
+backup_freeze_until = 0
+
+# Global scraping notifications state (toggleable by Owner/Admins via menu)
+notifications_active = True
+
+# Global automatic Telegraph backup sync states (toggleable by Owner/Admins, disabled by default)
+telegraph_active = False
+telegraph_freeze_until = 0
+
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/115.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 OPR/109.0.0.0",
+]
+
+IMPERSONATE_TARGETS = ["chrome110", "chrome116", "chrome120", "chrome123", "chrome124", "safari15_3", "safari17_0", "edge101"]
+
+def _new_scraper():
+    """Create a fresh scraper session with random browser fingerprint."""
+    target = random.choice(IMPERSONATE_TARGETS)
+    return cffi_requests.Session(impersonate=target)
+
+
+def _is_proxy_cooled(proxy_addr):
+    """Return True if this proxy is temporarily cooled down."""
+    if not proxy_addr:
         return False
     return time.time() < _proxy_cooldowns.get(proxy_addr, 0)
 
