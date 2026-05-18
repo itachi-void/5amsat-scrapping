@@ -1765,6 +1765,8 @@ def handle_callback_query(callback):
                 "🔓 `/unblock <id>` — إلغاء حظر مستخدم\n"
                 "🔕 `/mute <id>` — كتم إشعارات مستخدم معين بقوة\n"
                 "🔔 `/unmute <id>` — إلغاء كتم إشعارات مستخدم معين\n"
+                "🔇 `/muteall` — كتم إشعارات جميع المشتركين بقوة\n"
+                "🔊 `/unmuteall` — إلغاء كتم إشعارات جميع المشتركين\n"
                 "📢 `/broadcast <رسالة>` — إرسال بث عام للجميع مع ميزة المسح التفاعلي\n"
                 "🚀 `/send_last <عدد>` — جلب وإرسال عدد من أحدث الطلبات\n"
                 "📊 `/status` — عرض حالة البوت والإحصائيات الحالية للرسائل والباك أب\n"
@@ -1894,6 +1896,8 @@ def handle_updates_loop(poll_interval=2):
                     "/unblock":   2,
                     "/mute":      2,
                     "/unmute":    2,
+                    "/muteall":   2,
+                    "/unmuteall": 2,
                     "/approve":   2,
                     "/reject":    2,
                     "/pending":   2,
@@ -2102,6 +2106,22 @@ def handle_updates_loop(poll_interval=2):
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /unmute <id>"})
+
+                elif cmd == "/muteall":
+                    with subscribers_lock:
+                        subs = _load_subscribers()
+                        mu = _load_muted_users()
+                        for s in subs:
+                            mu.add(s)
+                        _save_muted_users(mu)
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔕 تم كتم إشعارات جميع المشتركين بنجاح."})
+
+                elif cmd == "/unmuteall":
+                    with subscribers_lock:
+                        mu = _load_muted_users()
+                        mu.clear()
+                        _save_muted_users(mu)
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔔 تم إعادة تفعيل الإشعارات لجميع المشتركين بنجاح."})
 
                 elif cmd == "/broadcast":
                     broadcast_msg = text[len("/broadcast"):].strip()
@@ -2341,6 +2361,8 @@ def handle_updates_loop(poll_interval=2):
                             "  /unblock <id> — إلغاء حظر مستخدم محظور\n"
                             "  /mute <id> — كتم إشعارات مستخدم معين بقوة\n"
                             "  /unmute <id> — إلغاء كتم إشعارات مستخدم معين\n"
+                            "  /muteall — كتم إشعارات جميع المشتركين بقوة\n"
+                            "  /unmuteall — إلغاء كتم إشعارات جميع المشتركين\n"
                             "  /broadcast <الرسالة> — بث رسالة لجميع المشتركين\n"
                             "  /send_last <العدد> — جلب وإرسال أحدث طلبات خمسات\n"
                             "  /status — عرض حالة البوت والإحصائيات والرسم البياني\n"
@@ -2372,6 +2394,8 @@ def handle_updates_loop(poll_interval=2):
                             "  /unblock <id> — إلغاء حظر مستخدم محظور\n"
                             "  /mute <id> — كتم إشعارات مستخدم معين بقوة\n"
                             "  /unmute <id> — إلغاء كتم إشعارات مستخدم معين\n"
+                            "  /muteall — كتم إشعارات جميع المشتركين بقوة\n"
+                            "  /unmuteall — إلغاء كتم إشعارات جميع المشتركين\n"
                             "  /broadcast <الرسالة> — بث رسالة لجميع المشتركين\n"
                             "  /send_last <العدد> — جلب وإرسال أحدث طلبات خمسات\n"
                             "  /status — عرض حالة البوت والإحصائيات والرسم البياني\n"
