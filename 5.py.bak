@@ -62,8 +62,6 @@ FINGERPRINT_TTL_SECONDS = int(os.getenv("FINGERPRINT_TTL_SECONDS", str(7 * 24 * 
 # Telegram send queue settings
 MESSAGE_QUEUE_MAX = int(os.getenv("MESSAGE_QUEUE_MAX", "5000"))
 DLQ_MAX = int(os.getenv("DLQ_MAX", "500"))
-_send_queue = queue.Queue(maxsize=MESSAGE_QUEUE_MAX)
-_dead_letter_count = 0
 
 # Sensitive values cache (set at runtime)
 _sensitive_values = set()
@@ -675,47 +673,9 @@ def _is_rate_limited(chat_id):
 # ==============================================================================
 # TELEGRAM BASE TRANSMITTER
 # ==============================================================================
-
-def _send_worker_loop():
-    global _dead_letter_count
-    while True:
-        item = _send_queue.get()
-        if item is None:
-            _send_queue.task_done()
-            break
-        chat_id, text, reply_markup, retries, parse_mode = item
-        if not KHAMSAT_BOT_TOKEN:
-            _send_queue.task_done()
-            continue
-        tele_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text}
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        ok = False
-        for attempt in range(max(1, retries)):
-            try:
-                r = requests.post(tele_url, json=payload, timeout=10)
-                if r.status_code == 200:
-                    ok = True
-                    break
-                elif r.status_code == 403:
-                    remove_subscriber(chat_id)
-                    break
-            except Exception:
-                pass
-            import time
-            time.sleep(1)
-        if not ok:
-            _dead_letter_count += 1
-        _send_queue.task_done()
-
 def _send_one(chat_id, text, reply_markup=None, retries=3, parse_mode=None):
-    try:
-        _send_queue.put_nowait((chat_id, text, reply_markup, retries, parse_mode))
-        return True, None
-    except queue.Full:
+    """Send message to user with auto-removal if bot blocked."""
+    if not KHAMSAT_BOT_TOKEN:
         return False, None
     tele_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
@@ -1943,22 +1903,6 @@ def handle_callback_query(callback):
 # ==============================================================================
 # PARAMETERIZED UPDATE HANDLER & COMMAND ROUTER
 # ==============================================================================
-
-def health_monitor_loop():
-    global _last_health_alert_ts
-    while True:
-        try:
-            import time
-            now = time.time()
-            if _fetch_fail_streak >= FETCH_FAIL_ALERT_THRESHOLD or _telegram_send_fail_streak >= TELEGRAM_FAIL_ALERT_THRESHOLD:
-                if (now - _last_health_alert_ts) > HEALTH_ALERT_COOLDOWN_SECONDS:
-                    _notify_admins(f"⚠️ **Khamsat Health Alert** ⚠️\n\n❌ Fetch failures: {_fetch_fail_streak}\n❌ Telegram send failures: {_telegram_send_fail_streak}")
-                    _last_health_alert_ts = now
-        except Exception:
-            pass
-        import time
-        time.sleep(60)
-
 def handle_updates_loop(poll_interval=2):
     if not KHAMSAT_BOT_TOKEN:
         logger.warning("Polling disabled for Khamsat (token is missing)")
@@ -2791,9 +2735,6 @@ if __name__ == "__main__":
             logger.info(f"Khamsat startup snapshot sent via {startup_proxy_type} proxy ({startup_proxy_addr})")
         else:
             logger.warning("No Khamsat startup requests were found")
-
-    threading.Thread(target=_send_worker_loop, daemon=True).start()
-    threading.Thread(target=health_monitor_loop, daemon=True).start()
 
     def khamsat_scraping_loop():
         if not KHAMSAT_BOT_TOKEN:
