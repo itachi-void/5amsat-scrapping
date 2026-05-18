@@ -1763,6 +1763,8 @@ def handle_callback_query(callback):
                 "⏳ `/pending` — عرض طلبات الاشتراك المعلقة\n"
                 "🚫 `/block <id>` — حظر مستخدم نهائياً\n"
                 "🔓 `/unblock <id>` — إلغاء حظر مستخدم\n"
+                "🔕 `/mute <id>` — كتم إشعارات مستخدم معين بقوة\n"
+                "🔔 `/unmute <id>` — إلغاء كتم إشعارات مستخدم معين\n"
                 "📢 `/broadcast <رسالة>` — إرسال بث عام للجميع مع ميزة المسح التفاعلي\n"
                 "🚀 `/send_last <عدد>` — جلب وإرسال عدد من أحدث الطلبات\n"
                 "📊 `/status` — عرض حالة البوت والإحصائيات الحالية للرسائل والباك أب\n"
@@ -1890,6 +1892,8 @@ def handle_updates_loop(poll_interval=2):
                     "/send_last": 2,
                     "/block":     2,
                     "/unblock":   2,
+                    "/mute":      2,
+                    "/unmute":    2,
                     "/approve":   2,
                     "/reject":    2,
                     "/pending":   2,
@@ -2063,6 +2067,41 @@ def handle_updates_loop(poll_interval=2):
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /unblock <id>"})
+
+                elif cmd == "/mute":
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        try:
+                            target_id = int(parts[1].strip())
+                            if target_id == get_owner_id():
+                                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لا يمكنك كتم إشعارات المالك!"})
+                            else:
+                                with subscribers_lock:
+                                    mu = _load_muted_users()
+                                    mu.add(target_id)
+                                    _save_muted_users(mu)
+                                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"🔕 تم كتم إشعارات المستخدم {target_id} بنجاح."})
+                                requests.post(f"{base_url}/sendMessage", json={"chat_id": target_id, "text": "🔕 لقد قام الأدمن بكتم إشعاراتك مؤقتاً."})
+                        except ValueError:
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
+                    else:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /mute <id>"})
+
+                elif cmd == "/unmute":
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        try:
+                            target_id = int(parts[1].strip())
+                            with subscribers_lock:
+                                mu = _load_muted_users()
+                                mu.discard(target_id)
+                                _save_muted_users(mu)
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"🔔 تم تفعيل إشعارات المستخدم {target_id} بنجاح."})
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": target_id, "text": "🔔 تم إعادة تفعيل إشعاراتك بواسطة الأدمن!"})
+                        except ValueError:
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
+                    else:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /unmute <id>"})
 
                 elif cmd == "/broadcast":
                     broadcast_msg = text[len("/broadcast"):].strip()
@@ -2300,6 +2339,8 @@ def handle_updates_loop(poll_interval=2):
                             "  /pending — عرض قائمة طلبات الاشتراك المعلقة\n"
                             "  /block <id> — حظر مستخدم من استخدام البوت\n"
                             "  /unblock <id> — إلغاء حظر مستخدم محظور\n"
+                            "  /mute <id> — كتم إشعارات مستخدم معين بقوة\n"
+                            "  /unmute <id> — إلغاء كتم إشعارات مستخدم معين\n"
                             "  /broadcast <الرسالة> — بث رسالة لجميع المشتركين\n"
                             "  /send_last <العدد> — جلب وإرسال أحدث طلبات خمسات\n"
                             "  /status — عرض حالة البوت والإحصائيات والرسم البياني\n"
@@ -2329,6 +2370,8 @@ def handle_updates_loop(poll_interval=2):
                             "  /pending — عرض قائمة طلبات الاشتراك المعلقة\n"
                             "  /block <id> — حظر مستخدم من استخدام البوت\n"
                             "  /unblock <id> — إلغاء حظر مستخدم محظور\n"
+                            "  /mute <id> — كتم إشعارات مستخدم معين بقوة\n"
+                            "  /unmute <id> — إلغاء كتم إشعارات مستخدم معين\n"
                             "  /broadcast <الرسالة> — بث رسالة لجميع المشتركين\n"
                             "  /send_last <العدد> — جلب وإرسال أحدث طلبات خمسات\n"
                             "  /status — عرض حالة البوت والإحصائيات والرسم البياني\n"
