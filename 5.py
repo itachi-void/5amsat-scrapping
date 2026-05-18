@@ -78,6 +78,8 @@ TELEGRAPH_PATH_KHAMSAT = "DB-05-17"
 
 PROXY_USER = ""
 PROXY_PASS = ""
+BACKUP_CHAT_ID = "-1003990598353"  # hardcoded fallback — overridden by BACKUP_CHAT_ID env var if set
+
 
 DATA_DIR = os.getenv("DATA_DIR", ".")
 if not os.path.exists(DATA_DIR):
