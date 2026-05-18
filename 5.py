@@ -665,6 +665,18 @@ def telegraph_sync_thread():
                 if r.get("ok"):
                     last_uploaded_db_hash_khamsat = db_hash
                     logger.info("Successfully synced Khamsat state to Telegraph DB!")
+                    # Optional: push the same backup to an external backup endpoint (e.g., a Railway service)
+                    try:
+                        railway_url = os.getenv("RAILWAY_BACKUP_URL", "").strip()
+                        railway_token = os.getenv("RAILWAY_BACKUP_TOKEN", "").strip()
+                        if railway_url:
+                            headers = {"Content-Type": "application/json"}
+                            if railway_token:
+                                headers["Authorization"] = f"Bearer {railway_token}"
+                            requests.post(railway_url, json=backup_data, headers=headers, timeout=15)
+                            logger.info("Pushed Khamsat backup to external Railway URL.")
+                    except Exception as _rexb:
+                        logger.warning(f"Failed to push backup to external Railway URL: {_rexb}")
         except Exception:
             pass
         time.sleep(120)
