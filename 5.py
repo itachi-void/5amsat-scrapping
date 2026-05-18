@@ -2127,6 +2127,8 @@ if __name__ == "__main__":
         
     # Send startup notifications
     if KHAMSAT_BOT_TOKEN:
+        server_name = os.getenv("SERVER_NAME") or os.getenv("RAILWAY_SERVICE_NAME") or os.getenv("HOSTNAME") or "unknown"
+        startup_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         try:
             requests.post(
                 f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage",
@@ -2136,11 +2138,10 @@ if __name__ == "__main__":
         except Exception:
             pass
         owner_startup_msg = (
-            "🚀 تم تشغيل بوت خمسات بنجاح!\n\n"
-            "لو حسيت إن الداتا طارت بسبب ريستارت السيرفر، مفيش مشكلة.\n"
-            "اعمل Reply على آخر ملف نسخ احتياطي أرسلتهولك، واكتب أمر:\n"
-            "/restore\n\n"
-            "والداتا كلها هترجع في ثانية واحدة."
+            "🚀 تم تشغيل البوت بنجاح.\n"
+            f"🖥️ السيرفر: {server_name}\n"
+            f"🕒 الوقت: {startup_time}\n\n"
+            "لو محتاج استرجاع: اعمل Reply على آخر backup واكتب /restore"
         )
         try:
             requests.post(f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage", json={"chat_id": get_owner_id(), "text": owner_startup_msg}, timeout=10)
