@@ -880,10 +880,15 @@ def check_mostaql():
         targets = (subs | _get_all_admins("mostaql")) - muted
         
         for p in reversed(new_projects):
-            msg_text = f"🚀 مشروع جديد على مستقل:\n\n📝 {p['title']}\n\n🔗 {p['link']}"
+            msg_text = f"🚀 مشروع جديد على مستقل:\n\n📝 {p['title']}"
+            reply_markup = {
+                "inline_keyboard": [
+                    [{"text": "عرض المشروع ↗️", "url": p['link']}]
+                ]
+            }
             sent_count = 0
             for cid in targets:
-                success, _ = _send_one("mostaql", cid, msg_text)
+                success, _ = _send_one("mostaql", cid, msg_text, reply_markup=reply_markup)
                 if success:
                     sent_count += 1
             _increment_stats("mostaql", sent_count)
@@ -935,10 +940,15 @@ def check_khamsat():
         new_projects.sort(key=lambda x: int(x["id"]))
         
         for p in new_projects:
-            msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 {p['title']}\n\n🔗 {p['link']}"
+            msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 {p['title']}"
+            reply_markup = {
+                "inline_keyboard": [
+                    [{"text": "عرض الطلب ↗️", "url": p['link']}]
+                ]
+            }
             sent_count = 0
             for cid in targets:
-                success, _ = _send_one("khamsat", cid, msg_text)
+                success, _ = _send_one("khamsat", cid, msg_text, reply_markup=reply_markup)
                 if success:
                     sent_count += 1
             _increment_stats("khamsat", sent_count)
