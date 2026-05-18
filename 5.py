@@ -898,7 +898,7 @@ def fetch_khamsat_projects(max_pages=8, max_attempts=12):
     global scraper, _khamsat_project_cache
     now = time.time()
     if _khamsat_project_cache["data"] and (now - _khamsat_project_cache["ts"]) < KHAMSAT_CACHE_TTL:
-        return _khamsat_project_cache["data"], "cache", None
+        return _khamsat_project_cache["data"], "cache", None, None
 
     headers = {"User-Agent": random.choice(USER_AGENTS)}
     all_proxies = list(premium_proxies) + list(free_proxies)
