@@ -2678,7 +2678,7 @@ def handle_updates_loop(poll_interval=2):
             time.sleep(poll_interval)
 
 # ==============================================================================
-# PERIODIC TASKS LOOP (STATS & 3-MINUTE AUTO TELEGRAM BACKUPS)
+# PERIODIC TASKS LOOP (STATS & 1-MINUTE AUTO TELEGRAM BACKUPS)
 # ==============================================================================
 def _periodic_tasks_loop():
     """Send weekly statistics and 1-minute automatic backups to owner."""
@@ -2706,7 +2706,7 @@ def _periodic_tasks_loop():
             _save_notifications_state()
             _notify_admins("🟢 انتهت مدة تجميد مزامنة Telegraph وتم تفعيلها تلقائياً كل دقيقتين!")
         
-        # 1-minute automatic backups (180 seconds)
+        # 1-minute automatic backups (60 seconds)
         if backup_active and backup_freeze_until == 0:
             if now - last_backup_sent >= 60:
                 try:
@@ -2726,10 +2726,10 @@ def _periodic_tasks_loop():
                             timeout=20
                         )
                         if r.status_code == 200:
-                            logger.info("3-minute backup sent to owner/backup channel via Khamsat")
+                            logger.info("1-minute backup sent to owner/backup channel via Khamsat")
                         else:
                             err_desc = r.json().get("description", r.text) if r.headers.get("content-type", "").startswith("application/json") else r.text
-                            logger.error(f"3-minute backup Telegram API error (Status {r.status_code}): {err_desc}")
+                            logger.error(f"1-minute backup Telegram API error (Status {r.status_code}): {err_desc}")
                     last_backup_sent = now
                 except Exception as e:
                     logger.error(f"1-minute backup error: {e}")
