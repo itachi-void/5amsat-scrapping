@@ -7,6 +7,7 @@ import requests
 import logging
 import threading
 from logging.handlers import RotatingFileHandler
+from bs4 import BeautifulSoup
 
 # Sync Locks and Shared Objects
 subscribers_lock = threading.Lock()

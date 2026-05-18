@@ -2,18 +2,21 @@ import sys
 import os
 import importlib.util
 
-sys.path.append(os.path.abspath(".."))
+# Resolve paths relative to this script's directory
+base_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.abspath(os.path.join(base_dir, ".."))
+sys.path.append(parent_dir)
 
 import time
 import random
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-# Load env variables from parent
-load_dotenv(dotenv_path="../.env")
+# Load env variables from parent (resolved path)
+load_dotenv(dotenv_path=os.path.join(parent_dir, ".env"))
 
-# Dynamically import 5.py
-spec = importlib.util.spec_from_file_location("bot_module", "../5.py")
+# Dynamically import 5.py from parent directory
+spec = importlib.util.spec_from_file_location("bot_module", os.path.join(parent_dir, "5.py"))
 bot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bot)
 
