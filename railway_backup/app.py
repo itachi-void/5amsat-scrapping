@@ -10,9 +10,12 @@ BACKUPS_DIR = pathlib.Path("backups")
 
 DB_URL = os.getenv("DATABASE_URL", "").strip()
 TOKEN = os.getenv("RAILWAY_BACKUP_TOKEN", "").strip()
+REQUIRE_TOKEN = os.getenv("REQUIRE_BACKUP_TOKEN", "1").strip() == "1"
+REQUIRE_DB = os.getenv("REQUIRE_DATABASE", "1").strip() == "1"
 
 # Lazy import of psycopg2 if DATABASE_URL present
 db_conn = None
+psycopg2 = None
 if DB_URL:
     try:
         import psycopg2
@@ -30,6 +33,12 @@ if DB_URL:
     except Exception as e:
         app.logger.warning(f"Failed to init DB: {e}")
         db_conn = None
+
+if REQUIRE_TOKEN and not TOKEN:
+    raise RuntimeError("RAILWAY_BACKUP_TOKEN is required when REQUIRE_BACKUP_TOKEN=1")
+
+if REQUIRE_DB and not db_conn:
+    raise RuntimeError("DATABASE_URL is required and must be reachable when REQUIRE_DATABASE=1")
 
 
 def _authorize(req):
@@ -62,6 +71,8 @@ def backup():
                 app.logger.error(f"DB insert failed: {e}")
                 return jsonify({"ok": False, "error": "db_error"}), 500
         else:
+            if REQUIRE_DB:
+                return jsonify({"ok": False, "error": "database_required"}), 500
             try:
                 BACKUPS_DIR.mkdir(exist_ok=True)
                 ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -90,6 +101,8 @@ def backup():
                 app.logger.error(f"DB select failed: {e}")
                 return jsonify({"ok": False, "error": "db_error"}), 500
         else:
+            if REQUIRE_DB:
+                return jsonify({"ok": False, "error": "database_required"}), 500
             latest = BACKUPS_DIR / "latest.json"
             if not latest.exists():
                 return jsonify({"ok": False, "error": "not_found"}), 404
@@ -104,7 +117,13 @@ def backup():
 
 @app.route("/", methods=["GET"])
 def index():
-    return jsonify({"ok": True, "service": "railway-backup"})
+    return jsonify({
+        "ok": True,
+        "service": "railway-backup",
+        "token_required": REQUIRE_TOKEN,
+        "database_required": REQUIRE_DB,
+        "database_connected": bool(db_conn),
+    })
 
 
 if __name__ == "__main__":

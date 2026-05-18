@@ -1,33 +1,36 @@
 Railway Backup endpoint
 
-This small Flask service exposes:
+This Flask service exposes:
 
-- POST /api/backup : store incoming backup JSON (requires Authorization Bearer token if `RAILWAY_BACKUP_TOKEN` is set)
-- GET /api/backup : return latest backup JSON (requires token if set)
+- `POST /api/backup`: store incoming backup JSON
+- `GET /api/backup`: return latest backup JSON
 
-Deployment (Railway CLI):
+Security and persistence defaults:
 
-1. From this folder run:
+- `RAILWAY_BACKUP_TOKEN` is required by default (`REQUIRE_BACKUP_TOKEN=1`)
+- `DATABASE_URL` is required by default (`REQUIRE_DATABASE=1`)
+- This guarantees data persistence across Railway deploys/restarts via Postgres
+
+Deployment (Railway):
+
+1. Deploy this folder (`railway_backup`) as a service.
+2. Add PostgreSQL in Railway project (plugin/service) and ensure `DATABASE_URL` is available in this service.
+3. Set service variables:
 
 ```bash
-railway init  # if not already linked to a project
-railway up
+RAILWAY_BACKUP_TOKEN=<strong-random-token>
+REQUIRE_BACKUP_TOKEN=1
+REQUIRE_DATABASE=1
 ```
 
-2. Set variables in Railway (Dashboard > Variables) or via CLI:
+4. Use this endpoint in bot service variables:
 
-```bash
-railway variables set RAILWAY_BACKUP_TOKEN=some-secret-token
-# Optional: add a PostgreSQL plugin and set DATABASE_URL automatically
-# railway add postgres
-# The plugin will provide DATABASE_URL in environment
-```
+- `RAILWAY_BACKUP_URL=https://<your-service>.up.railway.app/api/backup`
+- `RAILWAY_BACKUP_TOKEN=<same-token>`
 
-3. In your bot project (or Railway service for the bot) set:
+Behavior:
 
-- `RAILWAY_BACKUP_URL` to your deployed service URL, e.g. `https://<app>.up.railway.app/api/backup`
-- `RAILWAY_BACKUP_TOKEN` to the same token used above
+- Bot calls `download_railway_backup()` on startup to restore latest backup.
+- Bot pushes fresh backups to `RAILWAY_BACKUP_URL` during sync loop.
 
-After deploy the bot will automatically call `download_railway_backup()` at startup and `telegraph_sync_thread` will push backups to `RAILWAY_BACKUP_URL` when configured.
-
-If you want I can try to deploy this service for you now (you are already logged in with Railway CLI)."
+This setup ensures backup data survives new deploys and restarts.
