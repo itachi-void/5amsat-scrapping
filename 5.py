@@ -230,7 +230,8 @@ def _get_file_path(file_key):
         "seen": "max_id.json",
         "muted": "muted_users.json",
         "stats": "bot_stats.json",
-        "last_broadcast": "last_broadcast_msgs.json"
+        "last_broadcast": "last_broadcast_msgs.json",
+        "keywords": "keywords.json"
     }
     return os.path.join(DATA_DIR, f"khamsat_{names[file_key]}")
 
@@ -1771,8 +1772,11 @@ def handle_callback_query(callback):
                 "🚀 `/send_last <عدد>` — جلب وإرسال عدد من أحدث الطلبات\n"
                 "📊 `/status` — عرض حالة البوت والإحصائيات الحالية للرسائل والباك أب\n"
                 "💾 `/restore` — استعادة البيانات بالرد (Reply) على ملف الباك أب\n"
-                "❄️ `/backup_stop` أو `/backup_freeze` أو `/backup_end` أو `/freeze_backup` — تجميد الباك أب التلقائي (مثال: `/backup_stop 30` للتجميد 30 دقيقة)\n"
-                "🔥 `/backup_resume` أو `/backup_play` أو `/resume_backup` — تشغيل وإلغاء تجميد الباك أب التلقائي"
+                "⚙️ `/backup_menu` — فتح لوحة التحكم التفاعلية في الباك أب\n"
+                "❄️ `/freeze_backup` أو `/backup_freeze` أو `/backup_stop` أو `/backup_end` — تجميد الباك أب التلقائي (مثال: `/freeze_backup 30m` أو `2h` أو `1d`)\n"
+                "🟢 `/resume_backup` أو `/backup_resume` أو `/backup_play` — تشغيل وإلغاء تجميد الباك أب التلقائي\n"
+                "❄️ `/telegraph_freeze` أو `/telegraph_stop` أو `/telegraph_end` — تجميد المزامنة السحابية Telegraph (مثال: `/telegraph_freeze 2h`)\n"
+                "🟢 `/telegraph_resume` أو `/telegraph_play` — تشغيل وإلغاء تجميد مزامنة Telegraph"
             )
             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"})
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
@@ -2351,8 +2355,10 @@ def handle_updates_loop(poll_interval=2):
                             "👮‍♂️ **👮‍♂️ أوامر الإشراف (Allowed for Admins & Owners):**\n"
                             "  /menu — فتح لوحة تحكم الأدمن التفاعلية\n"
                             "  /backup_menu — فتح لوحة التحكم التفاعلية في الباك أب ⚙️\n"
-                            "  /freeze_backup [المدة] — تجميد الباك أب التلقائي (مثال: `/freeze_backup 30m` أو `2h` أو `1d` أو سيبها فاضية للتجميد نهائياً ❄️)\n"
-                            "  /resume_backup — تشغيل وإلغاء تجميد الباك أب التلقائي 🟢\n"
+                            "  /freeze_backup, /backup_freeze, /backup_stop, /backup_end — تجميد الباك أب التلقائي (مثال: `/freeze_backup 30m` أو `2h` أو `1d`)\n"
+                            "  /resume_backup, /backup_resume, /backup_play — تشغيل وإلغاء تجميد الباك أب التلقائي 🟢\n"
+                            "  /telegraph_freeze, /telegraph_stop, /telegraph_end — تجميد المزامنة السحابية Telegraph (مثال: `/telegraph_freeze 2h`)\n"
+                            "  /telegraph_resume, /telegraph_play — تشغيل المزامنة السحابية Telegraph 🟢\n"
                             "  /ids — عرض معرفات (IDs) المشتركين المعتمدين\n"
                             "  /approve <id> — قبول طلب اشتراك معلق\n"
                             "  /reject <id> — رفض طلب اشتراك معلق\n"
@@ -2384,8 +2390,10 @@ def handle_updates_loop(poll_interval=2):
                             "👮‍♂️ **👮‍♂️ أوامر الإشراف (Allowed for Admins):**\n"
                             "  /menu — فتح لوحة تحكم الأدمن التفاعلية\n"
                             "  /backup_menu — فتح لوحة التحكم التفاعلية في الباك أب ⚙️\n"
-                            "  /freeze_backup [المدة] — تجميد الباك أب التلقائي (مثال: `/freeze_backup 30m` أو `2h` أو `1d` أو سيبها فاضية للتجميد نهائياً ❄️)\n"
-                            "  /resume_backup — تشغيل وإلغاء تجميد الباك أب التلقائي 🟢\n"
+                            "  /freeze_backup, /backup_freeze, /backup_stop, /backup_end — تجميد الباك أب التلقائي (مثال: `/freeze_backup 30m` أو `2h` أو `1d`)\n"
+                            "  /resume_backup, /backup_resume, /backup_play — تشغيل وإلغاء تجميد الباك أب التلقائي 🟢\n"
+                            "  /telegraph_freeze, /telegraph_stop, /telegraph_end — تجميد المزامنة السحابية Telegraph (مثال: `/telegraph_freeze 2h`)\n"
+                            "  /telegraph_resume, /telegraph_play — تشغيل المزامنة السحابية Telegraph 🟢\n"
                             "  /ids — عرض معرفات (IDs) المشتركين المعتمدين\n"
                             "  /approve <id> — قبول طلب اشتراك معلق\n"
                             "  /reject <id> — رفض طلب اشتراك معلق\n"
