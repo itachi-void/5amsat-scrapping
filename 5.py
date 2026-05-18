@@ -646,6 +646,35 @@ def download_telegraph_db():
     except Exception as e:
         logger.error(f"Failed to download Telegraph DB: {e}")
 
+def download_railway_backup():
+    """If configured, fetch the latest backup from the external Railway backup URL and restore it."""
+    try:
+        railway_url = os.getenv("RAILWAY_BACKUP_URL", "").strip()
+        railway_token = os.getenv("RAILWAY_BACKUP_TOKEN", "").strip()
+        if not railway_url:
+            return
+
+        headers = {}
+        if railway_token:
+            headers["Authorization"] = f"Bearer {railway_token}"
+
+        # Expect the endpoint to return raw backup JSON (the same shape as generate_system_backup())
+        r = requests.get(railway_url, headers=headers, timeout=20)
+        if r.status_code != 200:
+            logger.warning(f"Failed to download Railway backup: HTTP {r.status_code}")
+            return
+
+        try:
+            backup_data = r.json()
+        except Exception:
+            backup_data = json.loads(r.content.decode("utf-8"))
+
+        if backup_data:
+            restore_system_backup(backup_data)
+            logger.info("Successfully restored Khamsat state from Railway backup!")
+    except Exception as e:
+        logger.error(f"Failed to download Railway backup: {e}")
+
 def telegraph_sync_thread():
     global last_uploaded_db_hash_khamsat
     
@@ -1976,6 +2005,8 @@ if __name__ == "__main__":
     # Download Telegraph backups dynamically
     if KHAMSAT_BOT_TOKEN:
         download_telegraph_db()
+    # Download Railway backups dynamically (if configured)
+    download_railway_backup()
         
     load_seen_data()
     load_proxies()
