@@ -206,11 +206,13 @@ def _proxy_rank_key(item):
 # ==============================================================================
 def load_all_configs():
     """Dynamically load configs from environment or local .env file."""
-    global KHAMSAT_BOT_TOKEN, PROXY_USER, PROXY_PASS, TELEGRAPH_TOKEN_KHAMSAT, TELEGRAPH_PATH_KHAMSAT
+    global KHAMSAT_BOT_TOKEN, PROXY_USER, PROXY_PASS, TELEGRAPH_TOKEN_KHAMSAT, TELEGRAPH_PATH_KHAMSAT, BACKUP_CHAT_ID
+    BACKUP_CHAT_ID = None
     
     KHAMSAT_BOT_TOKEN = os.getenv("BOT_TOKEN")
     PROXY_USER = os.getenv("PROXY_USER", "")
     PROXY_PASS = os.getenv("PROXY_PASS", "")
+    BACKUP_CHAT_ID = os.getenv("BACKUP_CHAT_ID")
     TELEGRAPH_TOKEN_KHAMSAT = os.getenv("TELEGRAPH_TOKEN", TELEGRAPH_TOKEN_KHAMSAT)
     TELEGRAPH_PATH_KHAMSAT = os.getenv("TELEGRAPH_PATH", TELEGRAPH_PATH_KHAMSAT)
 
@@ -232,6 +234,8 @@ def load_all_configs():
                         PROXY_USER = v
                     elif k == "PROXY_PASS":
                         PROXY_PASS = v
+                    elif k == "BACKUP_CHAT_ID":
+                        BACKUP_CHAT_ID = v
                     elif k == "TELEGRAPH_TOKEN":
                         TELEGRAPH_TOKEN_KHAMSAT = v
                     elif k == "TELEGRAPH_PATH":
@@ -364,13 +368,13 @@ def _send_backup_menu(chat_id, callback=None):
         time_str = f"{h} ساعة و {m} دقيقة" if h > 0 else f"{m} دقيقة"
         status_text = f"❄️ **مجمد مؤقتاً** (متبقي: `{time_str}`)"
     else:
-        status_text = "🟢 **نشط ويعمل تلقائياً كل 3 دقائق**"
+        status_text = "🟢 **نشط ويعمل تلقائياً كل دقيقة**"
         
     menu_text = (
         "💾 **إعدادات النسخ الاحتياطي التلقائي لبوت خمسات (Backup Settings):**\n\n"
         f"الحالة الحالية: {status_text}\n\n"
         "ℹ️ **الفرق بين الباك أب التلقائي ومزامنة Telegraph:**\n"
-        "• 💾 **الباك أب التلقائي (هذا القسم):** يقوم بإنشاء ملف نسخة احتياطية (.json) وإرساله لك مباشرةً في شات التليجرام كل 3 دقائق. تكمن أهميته في إمكانية عمل رد (Reply) عليه وكتابة أمر `/restore` لاستعادة البيانات يدوياً في أي وقت.\n"
+        "• 💾 **الباك أب التلقائي (هذا القسم):** يقوم بإنشاء ملف نسخة احتياطية (.json) وإرساله لك مباشرةً في شات التليجرام كل دقيقة. تكمن أهميته في إمكانية عمل رد (Reply) عليه وكتابة أمر `/restore` لاستعادة البيانات يدوياً في أي وقت.\n"
         "• ☁️ **مزامنة Telegraph:** هي مزامنة سحابية صامتة تحدث كل دقيقتين، حيث يتم حفظ نسخة مشفرة من قاعدة البيانات على خوادم Telegraph سحابياً. فائدتها أنها تُمكّن البوت من استرجاع كافة البيانات تلقائياً دون تدخل منك عند إعادة تشغيل البوت أو نقله لسيرفر جديد.\n\n"
         "💡 يمكنك التحكم في تشغيل أو تجميد الباك أب التلقائي واختيار مدة التجميد المناسبة من الخيارات أدناه:"
     )
@@ -1336,7 +1340,7 @@ def _send_telegraph_menu(chat_id, callback=None):
         f"الحالة الحالية: {status_text}\n\n"
         "ℹ️ **الفرق بين مزامنة Telegraph والباك أب التلقائي:**\n"
         "• ☁️ **مزامنة Telegraph (هذا القسم):** هي مزامنة سحابية صامتة تحدث كل دقيقتين، حيث يتم حفظ نسخة مشفرة من قاعدة البيانات على خوادم Telegraph سحابياً. فائدتها أنها تُمكّن البوت من استرجاع كافة البيانات تلقائياً دون تدخل منك عند إعادة تشغيل البوت أو نقله لسيرفر جديد.\n"
-        "• 💾 **الباك أب التلقائي:** يقوم بإنشاء ملف نسخة احتياطية (.json) وإرساله لك مباشرةً في شات التليجرام كل 3 دقائق. تكمن أهميته في إمكانية عمل رد (Reply) عليه وكتابة أمر `/restore` لاستعادة البيانات يدوياً في أي وقت.\n\n"
+        "• 💾 **الباك أب التلقائي:** يقوم بإنشاء ملف نسخة احتياطية (.json) وإرساله لك مباشرةً في شات التليجرام كل دقيقة. تكمن أهميته في إمكانية عمل رد (Reply) عليه وكتابة أمر `/restore` لاستعادة البيانات يدوياً في أي وقت.\n\n"
         "💡 يمكنك التحكم في تشغيل أو إيقاف النسخ الاحتياطي السحابي التلقائي إلى Telegraph واختيار مدة التجميد المناسبة من الأزرار أدناه:"
     )
     
@@ -1693,7 +1697,7 @@ def handle_callback_query(callback):
             diff_text = (
                 "🔄 **الفرق التفصيلي بين الباك أب التلقائي ومزامنة Telegraph:**\n\n"
                 "💾 **1. النسخ الاحتياطي التلقائي (Local Backup):**\n"
-                "• **كيف يعمل؟** يقوم البوت بتجميع كافة البيانات (المشتركين، الفلاتر، المحظورين، إلخ) وإرسالها لك مباشرة في شات التليجرام كملف `.json` كل 3 دقائق.\n"
+                "• **كيف يعمل؟** يقوم البوت بتجميع كافة البيانات (المشتركين، الفلاتر، المحظورين، إلخ) وإرسالها لك مباشرة في شات التليجرام كملف `.json` كل دقيقة.\n"
                 "• **فائدته:** يمنحك تحكماً يدوياً كاملاً؛ حيث يمكنك عمل رد (Reply) على أي ملف باك أب أرسله البوت وكتابة أمر `/restore` لاستعادة البيانات فوراً.\n\n"
                 "☁️ **2. مزامنة Telegraph السحابية (Telegraph Sync):**\n"
                 "• **كيف تعمل؟** يقوم البوت تلقائياً ومحلياً بحفظ نسخة مشفرة من قاعدة البيانات ورفعها سحابياً وتحديثها على صفحة Telegraph سحابية خاصة كل دقيقتين بصمت وبدون إرسال ملفات تملأ الشات.\n"
@@ -2354,12 +2358,15 @@ def handle_updates_loop(poll_interval=2):
                         import io
                         bio = io.BytesIO(backup_bytes)
                         bio.name = "system_backup_data.json"
+                        target_id = BACKUP_CHAT_ID if BACKUP_CHAT_ID else chat_id
                         requests.post(
                             f"{base_url}/sendDocument",
-                            data={"chat_id": chat_id, "caption": "💾 نسخة احتياطية كاملة وشاملة لبوت خمسات — استخدم /restore بالرد على هذا الملف لاستعادة كافة البيانات دفعة واحدة."},
+                            data={"chat_id": target_id, "caption": "💾 نسخة احتياطية كاملة وشاملة لبوت خمسات — استخدم /restore بالرد على هذا الملف لاستعادة كافة البيانات دفعة واحدة."},
                             files={"document": ("system_backup_data.json", bio, "application/json")},
                             timeout=20
                         )
+                        if str(target_id) != str(chat_id):
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ تم إرسال النسخة الاحتياطية إلى مجموعة الباك أب المخصصة."})
                     except Exception as _be:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"⚠️ فشل إنشاء الباك أب: {_be}"})
 
@@ -2418,7 +2425,7 @@ def handle_updates_loop(poll_interval=2):
                     backup_active = True
                     backup_freeze_until = 0
                     _save_notifications_state()
-                    response = "🟢 تم إلغاء التجميد وتشغيل النسخ الاحتياطي التلقائي بنجاح كل 3 دقائق!"
+                    response = "🟢 تم إلغاء التجميد وتشغيل النسخ الاحتياطي التلقائي بنجاح كل دقيقة!"
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": response})
 
                 elif cmd == "/backup_menu":
@@ -2667,7 +2674,7 @@ def handle_updates_loop(poll_interval=2):
 # PERIODIC TASKS LOOP (STATS & 3-MINUTE AUTO TELEGRAM BACKUPS)
 # ==============================================================================
 def _periodic_tasks_loop():
-    """Send weekly statistics and 3-minute automatic backups to owner."""
+    """Send weekly statistics and 1-minute automatic backups to owner."""
     time.sleep(10)
     last_stats_sent = time.time()
     last_backup_sent = time.time()
@@ -2682,7 +2689,7 @@ def _periodic_tasks_loop():
             backup_freeze_until = 0
             backup_active = True
             _save_notifications_state()
-            _notify_admins("🟢 انتهت مدة تجميد النسخ الاحتياطي التلقائي وتم تفعيله تلقائياً كل 3 دقائق!")
+            _notify_admins("🟢 انتهت مدة تجميد النسخ الاحتياطي التلقائي وتم تفعيله تلقائياً كل دقيقة!")
         
         # Check telegraph freeze expiration
         global telegraph_active, telegraph_freeze_until
@@ -2692,9 +2699,9 @@ def _periodic_tasks_loop():
             _save_notifications_state()
             _notify_admins("🟢 انتهت مدة تجميد مزامنة Telegraph وتم تفعيلها تلقائياً كل دقيقتين!")
         
-        # 3-minute automatic backups (180 seconds)
+        # 1-minute automatic backups (180 seconds)
         if backup_active and backup_freeze_until == 0:
-            if now - last_backup_sent >= 180:
+            if now - last_backup_sent >= 60:
                 try:
                     backup_data = generate_system_backup()
                     backup_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
@@ -2703,16 +2710,18 @@ def _periodic_tasks_loop():
                     bio.name = "system_backup_data.json"
                     
                     if KHAMSAT_BOT_TOKEN:
+                        owner_id = get_owner_id()
+                        target_chat_id = BACKUP_CHAT_ID if BACKUP_CHAT_ID else owner_id
                         requests.post(
                             f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendDocument",
-                            data={"chat_id": get_owner_id(), "caption": "📦 نسخة احتياطية تلقائية لبوت خمسات.\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
+                            data={"chat_id": target_chat_id, "caption": "📦 نسخة احتياطية تلقائية لبوت خمسات.\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
                             files={"document": ("system_backup_data.json", bio, "application/json")},
                             timeout=20
                         )
                     last_backup_sent = now
                     logger.info("3-minute backup sent to owner via Khamsat")
                 except Exception as e:
-                    logger.error(f"3-minute backup error: {e}")
+                    logger.error(f"1-minute backup error: {e}")
 
         # Weekly statistics
         if now - last_stats_sent >= 7 * 24 * 3600:
