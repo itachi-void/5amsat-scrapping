@@ -60,6 +60,10 @@ logging.getLogger().addHandler(_console_handler)
 premium_proxies = []  # [(scheme, addr)]
 free_proxies = []     # [(scheme, addr)]
 
+backup_active = True
+backup_freeze_until = 0
+
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -184,6 +188,99 @@ def _get_file_path(file_key):
         "last_broadcast": "last_broadcast_msgs.json"
     }
     return os.path.join(DATA_DIR, f"khamsat_{names[file_key]}")
+
+def _load_notifications_state():
+    global backup_active, backup_freeze_until
+    file_path = _get_file_path("state")
+    if not os.path.exists(file_path):
+        backup_active = True
+        backup_freeze_until = 0
+        return
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        backup_active = data.get("backup_active", True)
+        backup_freeze_until = data.get("backup_freeze_until", 0)
+    except Exception:
+        backup_active = True
+        backup_freeze_until = 0
+
+def _save_notifications_state():
+    file_path = _get_file_path("state")
+    tmp_path = file_path + ".tmp"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump({
+                "backup_active": backup_active,
+                "backup_freeze_until": backup_freeze_until
+            }, f, indent=4)
+        os.replace(tmp_path, file_path)
+    except Exception as e:
+        logger.error(f"Failed to save bot state: {e}")
+
+def _send_backup_menu(chat_id, callback=None):
+    if not KHAMSAT_BOT_TOKEN:
+        return
+    base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
+    
+    now = time.time()
+    if not backup_active:
+        status_text = "🔴 **مجمد نهائياً (موقوف تماماً)**"
+    elif now < backup_freeze_until:
+        remaining_sec = int(backup_freeze_until - now)
+        m, s = divmod(remaining_sec, 60)
+        h, m = divmod(m, 60)
+        time_str = f"{h} ساعة و {m} دقيقة" if h > 0 else f"{m} دقيقة"
+        status_text = f"❄️ **مجمد مؤقتاً** (متبقي: `{time_str}`)"
+    else:
+        status_text = "🟢 **نشط ويعمل تلقائياً كل 3 دقائق**"
+        
+    menu_text = (
+        "💾 **إعدادات النسخ الاحتياطي التلقائي لبوت خمسات (Backup Settings):**\n\n"
+        f"الحالة الحالية: {status_text}\n\n"
+        "💡 يمكنك التحكم في تشغيل أو تجميد الباك أب التلقائي واختيار مدة التجميد المناسبة من الخيارات أدناه:"
+    )
+    
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "🟢 تشغيل / إلغاء التجميد", "callback_data": "backup_op:resume"}
+            ],
+            [
+                {"text": "❄️ تجميد 30 دقيقة", "callback_data": "backup_op:freeze_30m"},
+                {"text": "❄️ تجميد ساعتين", "callback_data": "backup_op:freeze_2h"}
+            ],
+            [
+                {"text": "❄️ تجميد 6 ساعات", "callback_data": "backup_op:freeze_6h"},
+                {"text": "❄️ تجميد 12 ساعة", "callback_data": "backup_op:freeze_12h"}
+            ],
+            [
+                {"text": "❄️ تجميد 24 ساعة", "callback_data": "backup_op:freeze_24h"},
+                {"text": "🔴 تجميد نهائي (للأبد)", "callback_data": "backup_op:freeze_forever"}
+            ],
+            [
+                {"text": "🔙 العودة للوحة التحكم", "callback_data": "backup_op:back_to_menu"}
+            ]
+        ]
+    }
+    
+    if callback and "message" in callback:
+        msg_id = callback["message"]["message_id"]
+        requests.post(f"{base_url}/editMessageText", json={
+            "chat_id": chat_id,
+            "message_id": msg_id,
+            "text": menu_text,
+            "parse_mode": "Markdown",
+            "reply_markup": keyboard
+        })
+        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": callback["id"]})
+    else:
+        requests.post(f"{base_url}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": menu_text,
+            "parse_mode": "Markdown",
+            "reply_markup": keyboard
+        })
 
 def _load_subscribers():
     file_path = _get_file_path("subscribers")
@@ -444,7 +541,7 @@ def _is_rate_limited(chat_id):
 # ==============================================================================
 # TELEGRAM BASE TRANSMITTER
 # ==============================================================================
-def _send_one(chat_id, text, reply_markup=None, retries=3):
+def _send_one(chat_id, text, reply_markup=None, retries=3, parse_mode=None):
     """Send message to user with auto-removal if bot blocked."""
     if not KHAMSAT_BOT_TOKEN:
         return False, None
@@ -452,6 +549,9 @@ def _send_one(chat_id, text, reply_markup=None, retries=3):
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = reply_markup
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
     for attempt in range(retries):
         try:
             r = requests.post(tele_url, json=payload, timeout=10)
@@ -690,6 +790,69 @@ def extract_khamsat_projects(html_text):
 
     return projects
 
+def parse_duration(arg):
+    """Parse duration string like 30, 2h, 1d into minutes."""
+    arg = arg.strip().lower()
+    if not arg:
+        return None
+    if arg.isdigit():
+        return int(arg) # default is minutes
+    
+    # Check suffixes
+    unit = arg[-1]
+    num_part = arg[:-1]
+    if not num_part.isdigit():
+        return None
+    
+    val = int(num_part)
+    if unit == 'm':
+        return val
+    elif unit == 'h':
+        return val * 60
+    elif unit == 'd':
+        return val * 1440
+    else:
+        return None
+
+def fetch_khamsat_project_description(link, scraper_session, proxies, proxy_kind="direct", p_addr=None):
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+    try:
+        resp = scraper_session.get(link, headers=headers, proxies=proxies or {}, timeout=10)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            td = soup.find("td", class_="details-td")
+            if td:
+                import copy
+                td_copy = copy.copy(td)
+                h3 = td_copy.find("h3")
+                if h3: h3.decompose()
+                ul = td_copy.find("ul", class_="details-list")
+                if ul: ul.decompose()
+                
+                desc = td_copy.get_text("\n", strip=True)
+                if desc:
+                    return desc
+            
+            for selector in [".post_content", ".post-content", ".article-content", ".post_body", ".post__body", ".post_message", ".message"]:
+                d_el = soup.select_one(selector)
+                if d_el:
+                    desc = d_el.get_text("\n", strip=True)
+                    if desc: return desc
+        else:
+            logger.warning(f"Failed to fetch Khamsat description: {resp.status_code}")
+    except Exception as e:
+        logger.warning(f"Error fetching Khamsat description: {e}")
+    return ""
+
+def truncate_description(desc, max_words=25):
+    if not desc:
+        return ""
+    words = desc.split()
+    if len(words) > max_words:
+        return " ".join(words[:max_words]) + " ..."
+    return desc
+
+
 # ==============================================================================
 # MONITORING ENGINE & REAL-TIME EMITTERS
 # ==============================================================================
@@ -743,10 +906,16 @@ def check_khamsat():
         new_projects.sort(key=lambda x: int(x["id"]))
         
         for p in new_projects:
-            msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 {p['title']}"
+            desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_kind, p_addr)
+            truncated_desc = truncate_description(desc, max_words=25)
+            
+            msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 *{p['title']}*"
+            if truncated_desc:
+                msg_text += f"\n\n📄 {truncated_desc}"
+                
             reply_markup = {
                 "inline_keyboard": [
-                    [{"text": "عرض الطلب ↗️", "url": p['link']}]
+                    [{"text": "الذهاب للطلب 🌐", "url": p['link']}]
                 ]
             }
             title_lower = p['title'].lower()
@@ -763,7 +932,7 @@ def check_khamsat():
                     if not matched:
                         continue
                 
-                success, _ = _send_one(cid, msg_text, reply_markup=reply_markup)
+                success, _ = _send_one(cid, msg_text, reply_markup=reply_markup, parse_mode="Markdown")
                 if success:
                     sent_count += 1
             _increment_stats(sent_count)
@@ -894,6 +1063,18 @@ def _send_admin_menu(chat_id):
         return
     base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
     
+    now = time.time()
+    if not backup_active:
+        backup_status = "🔴 الباك اب: مجمد نهائياً"
+    elif now < backup_freeze_until:
+        remaining_sec = int(backup_freeze_until - now)
+        m, s = divmod(remaining_sec, 60)
+        h, m = divmod(m, 60)
+        time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+        backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
+    else:
+        backup_status = "🟢 الباك اب: يعمل تلقائياً"
+        
     keyboard = {
         "inline_keyboard": [
             [
@@ -903,6 +1084,9 @@ def _send_admin_menu(chat_id):
             [
                 {"text": "📊 التقارير البصرية", "callback_data": "cmd:view_visual"},
                 {"text": "🗑️ مسح آخر بث", "callback_data": "cmd:delete_broadcast"}
+            ],
+            [
+                {"text": backup_status, "callback_data": "cmd:manage_backup"}
             ]
         ]
     }
@@ -926,11 +1110,97 @@ def handle_callback_query(callback):
     if is_owner(chat_id): role = 3
     elif is_admin(chat_id): role = 2
     
+    if data.startswith("backup_op:"):
+        op = data.split("backup_op:", 1)[1]
+        
+        if role < 2:
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "هنهذر ولا اي", "show_alert": True})
+            return
+            
+        global backup_active, backup_freeze_until
+        
+        alert_text = ""
+        if op == "resume":
+            backup_active = True
+            backup_freeze_until = 0
+            alert_text = "🟢 تم تشغيل الباك أب وإلغاء التجميد بنجاح!"
+        elif op == "freeze_30m":
+            backup_active = True
+            backup_freeze_until = time.time() + 30 * 60
+            alert_text = "❄️ تم تجميد الباك أب لمدة 30 دقيقة."
+        elif op == "freeze_2h":
+            backup_active = True
+            backup_freeze_until = time.time() + 2 * 3600
+            alert_text = "❄️ تم تجميد الباك أب لمدة ساعتين."
+        elif op == "freeze_6h":
+            backup_active = True
+            backup_freeze_until = time.time() + 6 * 3600
+            alert_text = "❄️ تم تجميد الباك أب لمدة 6 ساعات."
+        elif op == "freeze_12h":
+            backup_active = True
+            backup_freeze_until = time.time() + 12 * 3600
+            alert_text = "❄️ تم تجميد الباك أب لمدة 12 ساعة."
+        elif op == "freeze_24h":
+            backup_active = True
+            backup_freeze_until = time.time() + 24 * 3600
+            alert_text = "❄️ تم تجميد الباك أب لمدة 24 ساعة."
+        elif op == "freeze_forever":
+            backup_active = False
+            backup_freeze_until = 0
+            alert_text = "🔴 تم تجميد الباك أب نهائياً ولن يتم إرساله تلقائياً."
+        elif op == "back_to_menu":
+            now = time.time()
+            if not backup_active:
+                backup_status = "🔴 الباك اب: مجمد نهائياً"
+            elif now < backup_freeze_until:
+                remaining_sec = int(backup_freeze_until - now)
+                m, s = divmod(remaining_sec, 60)
+                h, m = divmod(m, 60)
+                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+                backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
+            else:
+                backup_status = "🟢 الباك اب: يعمل تلقائياً"
+            
+            keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "⏳ الطلبات المعلقة", "callback_data": "cmd:view_pending"},
+                        {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}
+                    ],
+                    [
+                        {"text": "📊 التقارير البصرية", "callback_data": "cmd:view_visual"},
+                        {"text": "🗑️ مسح آخر بث", "callback_data": "cmd:delete_broadcast"}
+                    ],
+                    [
+                        {"text": backup_status, "callback_data": "cmd:manage_backup"}
+                    ]
+                ]
+            }
+            if "message" in callback:
+                msg_id = callback["message"]["message_id"]
+                requests.post(f"{base_url}/editMessageText", json={
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "text": "👑 لوحة تحكم أدمن بوت خمسات:",
+                    "reply_markup": keyboard
+                })
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+            return
+            
+        _save_notifications_state()
+        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": alert_text, "show_alert": True})
+        _send_backup_menu(chat_id, callback)
+        return
+
     if data.startswith("cmd:"):
         cmd = data.split("cmd:", 1)[1]
         
         if role < 2:
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "هنهذر ولا اي", "show_alert": True})
+            return
+            
+        if cmd == "manage_backup":
+            _send_backup_menu(chat_id, callback)
             return
             
         if cmd == "delete_broadcast":
@@ -1047,8 +1317,15 @@ def handle_updates_loop(poll_interval=2):
                     "/add_admin":    3,
                     "/remove_admin": 3,
                     "/backup":       3,
-
-                    "/restore":   2,
+                    "/restore":      2,
+                    "/freeze_backup": 2,
+                    "/backup_freeze": 2,
+                    "/backup_stop":   2,
+                    "/backup_end":    2,
+                    "/resume_backup": 2,
+                    "/backup_resume": 2,
+                    "/backup_play":   2,
+                    "/backup_menu":   2,
                     "/menu":      2,
                     "/ids":       2,
                     "/broadcast": 2,
@@ -1360,6 +1637,45 @@ def handle_updates_loop(poll_interval=2):
                         except Exception as _re:
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"❌ فشل الاستعادة: {_re}"})
 
+                elif cmd in ("/freeze_backup", "/backup_freeze", "/backup_stop", "/backup_end"):
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        duration_str = parts[1].strip()
+                        minutes = parse_duration(duration_str)
+                        if minutes is not None:
+                            backup_active = True
+                            backup_freeze_until = time.time() + minutes * 60
+                            _save_notifications_state()
+                            
+                            h, m = divmod(minutes, 60)
+                            d, h = divmod(h, 24)
+                            time_parts = []
+                            if d > 0: time_parts.append(f"{d} يوم")
+                            if h > 0: time_parts.append(f"{h} ساعة")
+                            if m > 0: time_parts.append(f"{m} دقيقة")
+                            time_desc = " و ".join(time_parts)
+                            
+                            response = f"❄️ تم تجميد النسخ الاحتياطي التلقائي بنجاح لمدة {time_desc}."
+                        else:
+                            response = f"⚠️ صيغة المدة غير صالحة! استخدم أرقاماً بالدقائق (مثال: `{cmd} 30`) أو بالساعات/الأيام (مثال: `2h` أو `1d`)."
+                    else:
+                        backup_active = False
+                        backup_freeze_until = 0
+                        _save_notifications_state()
+                        response = "🔴 تم تجميد النسخ الاحتياطي التلقائي نهائياً (للأبد) حتى تقوم بتشغيله مجدداً."
+                        
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": response, "parse_mode": "Markdown"})
+
+                elif cmd in ("/resume_backup", "/backup_resume", "/backup_play"):
+                    backup_active = True
+                    backup_freeze_until = 0
+                    _save_notifications_state()
+                    response = "🟢 تم إلغاء التجميد وتشغيل النسخ الاحتياطي التلقائي بنجاح كل 3 دقائق!"
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": response})
+
+                elif cmd == "/backup_menu":
+                    _send_backup_menu(chat_id)
+
                 elif cmd == "/pending":
                     with subscribers_lock:
                         pending = _load_pending()
@@ -1381,6 +1697,9 @@ def handle_updates_loop(poll_interval=2):
                             "  /backup — أخذ نسخة احتياطية فورية لبيانات البوت\n\n"
                             "👮‍♂️ **👮‍♂️ أوامر الإشراف (Allowed for Admins & Owners):**\n"
                             "  /menu — فتح لوحة تحكم الأدمن التفاعلية\n"
+                            "  /backup_menu — فتح لوحة التحكم التفاعلية في الباك أب ⚙️\n"
+                            "  /freeze_backup [المدة] — تجميد الباك أب التلقائي (مثال: `/freeze_backup 30m` أو `2h` أو `1d` أو سيبها فاضية للتجميد نهائياً ❄️)\n"
+                            "  /resume_backup — تشغيل وإلغاء تجميد الباك أب التلقائي 🟢\n"
                             "  /ids — عرض معرفات (IDs) المشتركين المعتمدين\n"
                             "  /approve <id> — قبول طلب اشتراك معلق\n"
                             "  /reject <id> — رفض طلب اشتراك معلق\n"
@@ -1407,6 +1726,9 @@ def handle_updates_loop(poll_interval=2):
                             f"🤖 **دليل أوامر البوت الكامل — رتبة الأدمن (Admin) (خمسات):**\n\n"
                             "👮‍♂️ **👮‍♂️ أوامر الإشراف (Allowed for Admins):**\n"
                             "  /menu — فتح لوحة تحكم الأدمن التفاعلية\n"
+                            "  /backup_menu — فتح لوحة التحكم التفاعلية في الباك أب ⚙️\n"
+                            "  /freeze_backup [المدة] — تجميد الباك أب التلقائي (مثال: `/freeze_backup 30m` أو `2h` أو `1d` أو سيبها فاضية للتجميد نهائياً ❄️)\n"
+                            "  /resume_backup — تشغيل وإلغاء تجميد الباك أب التلقائي 🟢\n"
                             "  /ids — عرض معرفات (IDs) المشتركين المعتمدين\n"
                             "  /approve <id> — قبول طلب اشتراك معلق\n"
                             "  /reject <id> — رفض طلب اشتراك معلق\n"
@@ -1558,26 +1880,35 @@ def _periodic_tasks_loop():
         time.sleep(30)  # Check every 30 seconds
         now = time.time()
         
+        # Check freeze expiration
+        global backup_active, backup_freeze_until
+        if backup_freeze_until > 0 and now >= backup_freeze_until:
+            backup_freeze_until = 0
+            backup_active = True
+            _save_notifications_state()
+            _notify_admins("🟢 انتهت مدة تجميد النسخ الاحتياطي التلقائي وتم تفعيله تلقائياً كل 3 دقائق!")
+        
         # 3-minute automatic backups (180 seconds)
-        if now - last_backup_sent >= 180:
-            try:
-                backup_data = generate_system_backup()
-                backup_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
-                import io
-                bio = io.BytesIO(backup_bytes)
-                bio.name = "system_backup_data.json"
-                
-                if KHAMSAT_BOT_TOKEN:
-                    requests.post(
-                        f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendDocument",
-                        data={"chat_id": get_owner_id(), "caption": "📦 نسخة احتياطية تلقائية لبوت خمسات.\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
-                        files={"document": ("system_backup_data.json", bio, "application/json")},
-                        timeout=20
-                    )
-                last_backup_sent = now
-                logger.info("3-minute backup sent to owner via Khamsat")
-            except Exception as e:
-                logger.error(f"3-minute backup error: {e}")
+        if backup_active and backup_freeze_until == 0:
+            if now - last_backup_sent >= 180:
+                try:
+                    backup_data = generate_system_backup()
+                    backup_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
+                    import io
+                    bio = io.BytesIO(backup_bytes)
+                    bio.name = "system_backup_data.json"
+                    
+                    if KHAMSAT_BOT_TOKEN:
+                        requests.post(
+                            f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendDocument",
+                            data={"chat_id": get_owner_id(), "caption": "📦 نسخة احتياطية تلقائية لبوت خمسات.\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
+                            files={"document": ("system_backup_data.json", bio, "application/json")},
+                            timeout=20
+                        )
+                    last_backup_sent = now
+                    logger.info("3-minute backup sent to owner via Khamsat")
+                except Exception as e:
+                    logger.error(f"3-minute backup error: {e}")
 
         # Weekly statistics
         if now - last_stats_sent >= 7 * 24 * 3600:
@@ -1627,6 +1958,7 @@ def load_seen_data():
 
 if __name__ == "__main__":
     load_all_configs()
+    _load_notifications_state()
     
     # Download Telegraph backups dynamically
     if KHAMSAT_BOT_TOKEN:
