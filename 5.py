@@ -72,6 +72,13 @@ free_proxies = []     # [(scheme, addr)]
 backup_active = True
 backup_freeze_until = 0
 
+# Global scraping notifications state (toggleable by Owner/Admins via menu)
+notifications_active = True
+
+# Global automatic Telegraph backup sync states (toggleable by Owner/Admins, disabled by default)
+telegraph_active = False
+telegraph_freeze_until = 0
+
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -228,20 +235,29 @@ def _get_file_path(file_key):
     return os.path.join(DATA_DIR, f"khamsat_{names[file_key]}")
 
 def _load_notifications_state():
-    global backup_active, backup_freeze_until
+    global notifications_active, backup_active, backup_freeze_until, telegraph_active, telegraph_freeze_until
     file_path = _get_file_path("state")
     if not os.path.exists(file_path):
+        notifications_active = True
         backup_active = True
         backup_freeze_until = 0
+        telegraph_active = False
+        telegraph_freeze_until = 0
         return
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+        notifications_active = data.get("notifications_active", True)
         backup_active = data.get("backup_active", True)
         backup_freeze_until = data.get("backup_freeze_until", 0)
+        telegraph_active = data.get("telegraph_active", False)
+        telegraph_freeze_until = data.get("telegraph_freeze_until", 0)
     except Exception:
+        notifications_active = True
         backup_active = True
         backup_freeze_until = 0
+        telegraph_active = False
+        telegraph_freeze_until = 0
 
 def _save_notifications_state():
     file_path = _get_file_path("state")
@@ -249,8 +265,11 @@ def _save_notifications_state():
     try:
         with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump({
+                "notifications_active": notifications_active,
                 "backup_active": backup_active,
-                "backup_freeze_until": backup_freeze_until
+                "backup_freeze_until": backup_freeze_until,
+                "telegraph_active": telegraph_active,
+                "telegraph_freeze_until": telegraph_freeze_until
             }, f, indent=4)
         os.replace(tmp_path, file_path)
     except Exception as e:
@@ -717,32 +736,34 @@ def telegraph_sync_thread():
     
     while True:
         try:
-            backup_data = generate_full_backup()
-            db_str = json.dumps(backup_data)
-            db_hash = hash(db_str)
-            
-            if db_hash != last_uploaded_db_hash_khamsat:
-                content = [{"tag":"p", "children":[db_str]}]
-                r = requests.post(f'https://api.telegra.ph/editPage/{TELEGRAPH_PATH_KHAMSAT}', json={
-                    'access_token': TELEGRAPH_TOKEN_KHAMSAT,
-                    'title': 'DB_khamsat',
-                    'content': json.dumps(content)
-                }).json()
-                if r.get("ok"):
-                    last_uploaded_db_hash_khamsat = db_hash
-                    logger.info("Successfully synced Khamsat state to Telegraph DB!")
-                    # Optional: push the same backup to an external backup endpoint (e.g., a Railway service)
-                    try:
-                        railway_url = os.getenv("RAILWAY_BACKUP_URL", "").strip()
-                        railway_token = os.getenv("RAILWAY_BACKUP_TOKEN", "").strip()
-                        if railway_url:
-                            headers = {"Content-Type": "application/json"}
-                            if railway_token:
-                                headers["Authorization"] = f"Bearer {railway_token}"
-                            requests.post(railway_url, json=backup_data, headers=headers, timeout=15)
-                            logger.info("Pushed Khamsat backup to external Railway URL.")
-                    except Exception as _rexb:
-                        logger.warning(f"Failed to push backup to external Railway URL: {_rexb}")
+            now = time.time()
+            if telegraph_active and (telegraph_freeze_until == 0 or now >= telegraph_freeze_until):
+                backup_data = generate_full_backup()
+                db_str = json.dumps(backup_data)
+                db_hash = hash(db_str)
+                
+                if db_hash != last_uploaded_db_hash_khamsat:
+                    content = [{"tag":"p", "children":[db_str]}]
+                    r = requests.post(f'https://api.telegra.ph/editPage/{TELEGRAPH_PATH_KHAMSAT}', json={
+                        'access_token': TELEGRAPH_TOKEN_KHAMSAT,
+                        'title': 'DB_khamsat',
+                        'content': json.dumps(content)
+                    }).json()
+                    if r.get("ok"):
+                        last_uploaded_db_hash_khamsat = db_hash
+                        logger.info("Successfully synced Khamsat state to Telegraph DB!")
+                        # Optional: push the same backup to an external backup endpoint (e.g., a Railway service)
+                        try:
+                            railway_url = os.getenv("RAILWAY_BACKUP_URL", "").strip()
+                            railway_token = os.getenv("RAILWAY_BACKUP_TOKEN", "").strip()
+                            if railway_url:
+                                headers = {"Content-Type": "application/json"}
+                                if railway_token:
+                                    headers["Authorization"] = f"Bearer {railway_token}"
+                                requests.post(railway_url, json=backup_data, headers=headers, timeout=15)
+                                logger.info("Pushed Khamsat backup to external Railway URL.")
+                        except Exception as _rexb:
+                            logger.warning(f"Failed to push backup to external Railway URL: {_rexb}")
         except Exception:
             pass
         time.sleep(120)
@@ -1178,11 +1199,78 @@ def _send_photo(chat_id, photo_buf, caption=""):
         logger.error(f"Failed to send photo: {e}")
         return False
 
+def _send_telegraph_menu(chat_id, callback=None):
+    if not KHAMSAT_BOT_TOKEN:
+        return
+    base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
+    
+    now = time.time()
+    if not telegraph_active:
+        status_text = "🔴 **مغلقة (موقوفة تماماً)**"
+    elif now < telegraph_freeze_until:
+        remaining_sec = int(telegraph_freeze_until - now)
+        m, s = divmod(remaining_sec, 60)
+        h, m = divmod(m, 60)
+        time_str = f"{h} ساعة و {m} دقيقة" if h > 0 else f"{m} دقيقة"
+        status_text = f"❄️ **مجمدة مؤقتاً** (متبقي: `{time_str}`)"
+    else:
+        status_text = "🟢 **نشطة وتعمل تلقائياً كل دقيقتين**"
+        
+    menu_text = (
+        "☁️ **إعدادات النسخ الاحتياطي السحابي لبوت خمسات (Telegraph Backup Settings):**\n\n"
+        f"الحالة الحالية: {status_text}\n\n"
+        "💡 يمكنك التحكم في تشغيل أو إيقاف النسخ الاحتياطي السحابي التلقائي إلى Telegraph واختيار مدة التجميد المناسبة من الأزرار أدناه:"
+    )
+    
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "🟢 تشغيل / إلغاء التجميد", "callback_data": "tele_op:resume"}
+            ],
+            [
+                {"text": "❄️ تجميد 30 دقيقة", "callback_data": "tele_op:freeze_30m"},
+                {"text": "❄️ تجميد ساعتين", "callback_data": "tele_op:freeze_2h"}
+            ],
+            [
+                {"text": "❄️ تجميد 12 ساعة", "callback_data": "tele_op:freeze_12h"},
+                {"text": "🔴 إيقاف كامل (للأبد)", "callback_data": "tele_op:freeze_forever"}
+            ],
+            [
+                {"text": "🔙 العودة للوحة التحكم", "callback_data": "tele_op:back_to_menu"}
+            ]
+        ]
+    }
+    
+    if callback and "message" in callback:
+        msg_id = callback["message"]["message_id"]
+        requests.post(f"{base_url}/editMessageText", json={
+            "chat_id": chat_id,
+            "message_id": msg_id,
+            "text": menu_text,
+            "parse_mode": "Markdown",
+            "reply_markup": keyboard
+        })
+        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": callback["id"]})
+    else:
+        requests.post(f"{base_url}/sendMessage", json={
+            "chat_id": chat_id,
+            "text": menu_text,
+            "parse_mode": "Markdown",
+            "reply_markup": keyboard
+        })
+
 def _send_admin_menu(chat_id):
     if not KHAMSAT_BOT_TOKEN:
         return
     base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
     
+    site_label = "خمسات"
+    
+    # Check current state of notifications to toggle button label dynamically
+    status_emoji = "🔔" if notifications_active else "🔕"
+    status_text = "تشغيل الإشعارات" if not notifications_active else "إيقاف الإشعارات"
+    
+    # Check current state of local backup to show in the menu
     now = time.time()
     if not backup_active:
         backup_status = "🔴 الباك اب: مجمد نهائياً"
@@ -1194,29 +1282,58 @@ def _send_admin_menu(chat_id):
         backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
     else:
         backup_status = "🟢 الباك اب: يعمل تلقائياً"
-        
+
+    # Check current state of Telegraph backup
+    if not telegraph_active:
+        telegraph_status = "🔴 مزامنة Telegraph: مغلقة"
+    elif now < telegraph_freeze_until:
+        remaining_sec = int(telegraph_freeze_until - now)
+        m, s = divmod(remaining_sec, 60)
+        h, m = divmod(m, 60)
+        time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+        telegraph_status = f"❄️ مزامنة Telegraph: مجمدة (باقي {time_str})"
+    else:
+        telegraph_status = "🟢 مزامنة Telegraph: تعمل تلقائياً"
+
     keyboard = {
         "inline_keyboard": [
             [
-                {"text": "⏳ الطلبات المعلقة", "callback_data": "cmd:view_pending"},
+                {"text": "👨‍💻 إدارة الأدمنز", "callback_data": "cmd:manage_admins"}
+            ],
+            [
+                {"text": "⏳ طلبات معلقة", "callback_data": "cmd:view_pending"},
+                {"text": "👥 المشتركين", "callback_data": "cmd:view_subs"}
+            ],
+            [
+                {"text": "🚫 المحظورين", "callback_data": "cmd:view_blocked"},
                 {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}
             ],
             [
-                {"text": "📊 التقارير البصرية", "callback_data": "cmd:view_visual"},
-                {"text": "🗑️ مسح آخر بث", "callback_data": "cmd:delete_broadcast"}
+                {"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}
             ],
             [
                 {"text": backup_status, "callback_data": "cmd:manage_backup"}
+            ],
+            [
+                {"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}
+            ],
+            [
+                {"text": "❓ المساعدة", "callback_data": "cmd:admin_help"},
+                {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}
+            ],
+            [
+                {"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}
             ]
         ]
     }
     requests.post(f"{base_url}/sendMessage", json={
         "chat_id": chat_id,
-        "text": f"👑 لوحة تحكم أدمن بوت خمسات:",
+        "text": f"👑 لوحة تحكم أدمن بوت {site_label}:",
         "reply_markup": keyboard
     })
 
 def handle_callback_query(callback):
+    global notifications_active, backup_active, backup_freeze_until, telegraph_active, telegraph_freeze_until
     if not KHAMSAT_BOT_TOKEN:
         return
     base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
@@ -1230,6 +1347,36 @@ def handle_callback_query(callback):
     if is_owner(chat_id): role = 3
     elif is_admin(chat_id): role = 2
     
+    # 1. Handle FAQ clicks (accessible by everyone, including subscribers)
+    if data.startswith("faq:"):
+        faq_key = data.split("faq:", 1)[1]
+        
+        if faq_key == "how_works":
+            faq_text = (
+                "🤖 **كيف يعمل البوت؟**\n\n"
+                "يقوم البوت بمراقبة موقع خمسات على مدار 24 ساعة بدون توقف.\n"
+                "بمجرد نشر أي طلب جديد على خمسات، يقوم البوت بجلبه فوراً وإرساله لك في الشات مع زر مباشر للانتقال إلى صفحة الطلب وتقديم عرضك قبل الجميع! ⚡"
+            )
+        elif faq_key == "how_filter":
+            faq_text = (
+                "🏷️ **كيف أقوم بتفعيل فلتر التخصص؟**\n\n"
+                "يمكنك فلترة الطلبات واستقبل ما يهمك فقط باستخدام أمر `/filter`:\n\n"
+                "✍️ **طريقة التفعيل:**\n"
+                "أرسل أمر `/filter` متبوعاً بالكلمات المفتاحية التي تهمك مفصولة بفواصل.\n"
+                "مثال: `/filter برمجة, تصميم, كول سنتر`\n\n"
+                "🗑️ **لإلغاء الفلتر واستقبال كل الطلبات:**\n"
+                "أرسل أمر: `/filter_clear`\n\n"
+                "🔍 **لعرض فلاترك الحالية:**\n"
+                "أرسل أمر `/myfilters`."
+            )
+        else:
+            faq_text = "⚠️ خيار غير معروف."
+            
+        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": faq_text, "parse_mode": "Markdown"})
+        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+        return
+
+    # 2. Admin operations
     if data.startswith("backup_op:"):
         op = data.split("backup_op:", 1)[1]
         
@@ -1237,8 +1384,6 @@ def handle_callback_query(callback):
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "هنهذر ولا اي", "show_alert": True})
             return
             
-        global backup_active, backup_freeze_until
-        
         alert_text = ""
         if op == "resume":
             backup_active = True
@@ -1269,6 +1414,9 @@ def handle_callback_query(callback):
             backup_freeze_until = 0
             alert_text = "🔴 تم تجميد الباك أب نهائياً ولن يتم إرساله تلقائياً."
         elif op == "back_to_menu":
+            status_emoji = "🔔" if notifications_active else "🔕"
+            status_text = "تشغيل الإشعارات" if not notifications_active else "إيقاف الإشعارات"
+            
             now = time.time()
             if not backup_active:
                 backup_status = "🔴 الباك اب: مجمد نهائياً"
@@ -1280,20 +1428,28 @@ def handle_callback_query(callback):
                 backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
             else:
                 backup_status = "🟢 الباك اب: يعمل تلقائياً"
-            
+
+            if not telegraph_active:
+                telegraph_status = "🔴 مزامنة Telegraph: مغلقة"
+            elif now < telegraph_freeze_until:
+                remaining_sec = int(telegraph_freeze_until - now)
+                m, s = divmod(remaining_sec, 60)
+                h, m = divmod(m, 60)
+                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+                telegraph_status = f"❄️ مزامنة Telegraph: مجمدة (باقي {time_str})"
+            else:
+                telegraph_status = "🟢 مزامنة Telegraph: تعمل تلقائياً"
+
             keyboard = {
                 "inline_keyboard": [
-                    [
-                        {"text": "⏳ الطلبات المعلقة", "callback_data": "cmd:view_pending"},
-                        {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}
-                    ],
-                    [
-                        {"text": "📊 التقارير البصرية", "callback_data": "cmd:view_visual"},
-                        {"text": "🗑️ مسح آخر بث", "callback_data": "cmd:delete_broadcast"}
-                    ],
-                    [
-                        {"text": backup_status, "callback_data": "cmd:manage_backup"}
-                    ]
+                    [{"text": "👨‍💻 إدارة الأدمنز", "callback_data": "cmd:manage_admins"}],
+                    [{"text": "⏳ طلبات معلقة", "callback_data": "cmd:view_pending"}, {"text": "👥 المشتركين", "callback_data": "cmd:view_subs"}],
+                    [{"text": "🚫 المحظورين", "callback_data": "cmd:view_blocked"}, {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}],
+                    [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
+                    [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
+                    [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
+                    [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
                 ]
             }
             if "message" in callback:
@@ -1312,6 +1468,89 @@ def handle_callback_query(callback):
         _send_backup_menu(chat_id, callback)
         return
 
+    if data.startswith("tele_op:"):
+        op = data.split("tele_op:", 1)[1]
+        
+        if role < 2:
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "هنهذر ولا اي", "show_alert": True})
+            return
+        
+        alert_text = ""
+        if op == "resume":
+            telegraph_active = True
+            telegraph_freeze_until = 0
+            alert_text = "🟢 تم تشغيل مزامنة Telegraph وإلغاء التجميد بنجاح!"
+        elif op == "freeze_30m":
+            telegraph_active = True
+            telegraph_freeze_until = time.time() + 30 * 60
+            alert_text = "❄️ تم تجميد مزامنة Telegraph لمدة 30 دقيقة."
+        elif op == "freeze_2h":
+            telegraph_active = True
+            telegraph_freeze_until = time.time() + 2 * 3600
+            alert_text = "❄️ تم تجميد مزامنة Telegraph لمدة ساعتين."
+        elif op == "freeze_12h":
+            telegraph_active = True
+            telegraph_freeze_until = time.time() + 12 * 3600
+            alert_text = "❄️ تم تجميد مزامنة Telegraph لمدة 12 ساعة."
+        elif op == "freeze_forever":
+            telegraph_active = False
+            telegraph_freeze_until = 0
+            alert_text = "🔴 تم تعطيل مزامنة Telegraph نهائياً."
+        elif op == "back_to_menu":
+            status_emoji = "🔔" if notifications_active else "🔕"
+            status_text = "تشغيل الإشعارات" if not notifications_active else "إيقاف الإشعارات"
+            
+            now = time.time()
+            if not backup_active:
+                backup_status = "🔴 الباك اب: مجمد نهائياً"
+            elif now < backup_freeze_until:
+                remaining_sec = int(backup_freeze_until - now)
+                m, s = divmod(remaining_sec, 60)
+                h, m = divmod(m, 60)
+                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+                backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
+            else:
+                backup_status = "🟢 الباك اب: يعمل تلقائياً"
+
+            if not telegraph_active:
+                telegraph_status = "🔴 مزامنة Telegraph: مغلقة"
+            elif now < telegraph_freeze_until:
+                remaining_sec = int(telegraph_freeze_until - now)
+                m, s = divmod(remaining_sec, 60)
+                h, m = divmod(m, 60)
+                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+                telegraph_status = f"❄️ مزامنة Telegraph: مجمدة (باقي {time_str})"
+            else:
+                telegraph_status = "🟢 مزامنة Telegraph: تعمل تلقائياً"
+
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "👨‍💻 إدارة الأدمنز", "callback_data": "cmd:manage_admins"}],
+                    [{"text": "⏳ طلبات معلقة", "callback_data": "cmd:view_pending"}, {"text": "👥 المشتركين", "callback_data": "cmd:view_subs"}],
+                    [{"text": "🚫 المحظورين", "callback_data": "cmd:view_blocked"}, {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}],
+                    [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
+                    [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
+                    [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
+                    [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
+                ]
+            }
+            if "message" in callback:
+                msg_id = callback["message"]["message_id"]
+                requests.post(f"{base_url}/editMessageText", json={
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "text": "👑 لوحة تحكم أدمن بوت خمسات:",
+                    "reply_markup": keyboard
+                })
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+            return
+            
+        _save_notifications_state()
+        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": alert_text, "show_alert": True})
+        _send_telegraph_menu(chat_id, callback)
+        return
+
     if data.startswith("cmd:"):
         cmd = data.split("cmd:", 1)[1]
         
@@ -1323,7 +1562,11 @@ def handle_callback_query(callback):
             _send_backup_menu(chat_id, callback)
             return
             
-        if cmd == "delete_broadcast":
+        elif cmd == "manage_telegraph":
+            _send_telegraph_menu(chat_id, callback)
+            return
+            
+        elif cmd == "delete_broadcast":
             broadcast_msgs = _load_broadcast_msgs()
             if not broadcast_msgs:
                 requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "⚠️ لا توجد رسالة بث مسجلة للمسح.", "show_alert": True})
@@ -1388,6 +1631,169 @@ def handle_callback_query(callback):
             else:
                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ فشل توليد التقرير البصري."})
 
+        elif cmd == "manage_admins":
+            if role < 3:
+                requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "⚠️ عذراً، هذا القسم مخصص لمالك البوت فقط.", "show_alert": True})
+                return
+            admins = _get_all_admins()
+            lines = ["👨‍💻 **إدارة الأدمنز الحاليين لبوت خمسات:**\n"]
+            for idx, aid in enumerate(sorted(admins), 1):
+                lines.append(f"{idx}. 🆔 `{aid}`")
+            lines.append("\n💡 **التحكم بالصلاحيات:**")
+            lines.append("➕ لإضافة أدمن: أرسل `/add_admin <id>`")
+            lines.append("➖ لحذف أدمن: أرسل `/remove_admin <id>`")
+            
+            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"})
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+
+        elif cmd == "view_subs":
+            subs = _load_subscribers()
+            if not subs:
+                requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "👥 لا يوجد أي مشتركين مسجلين حالياً.", "show_alert": True})
+            else:
+                lines = [f"👥 **المشتركين النشطين (العدد: {len(subs)}):**\n"]
+                for sid in sorted(subs):
+                    lines.append(f"🆔 `{sid}`  →  /block {sid}")
+                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"})
+                requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+
+        elif cmd == "view_blocked":
+            blocked = _load_blocked()
+            if not blocked:
+                requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "🚫 لا توجد حسابات محظورة حالياً.", "show_alert": True})
+            else:
+                lines = [f"🚫 **المستخدمين المحظورين (العدد: {len(blocked)}):**\n"]
+                for bid in sorted(blocked):
+                    lines.append(f"🆔 `{bid}`  →  /unblock {bid}")
+                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"})
+                requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+
+        elif cmd == "toggle_notifications":
+            notifications_active = not notifications_active
+            _save_notifications_state()
+            
+            state_label = "✅ تم تشغيل الإشعارات وجاري الفحص المستمر لموقع خمسات!" if notifications_active else "🔕 تم إيقاف الإشعارات وتجميد الفحص لموقع خمسات مؤقتاً."
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": state_label, "show_alert": True})
+            
+            status_emoji = "🔔" if notifications_active else "🔕"
+            status_text = "تشغيل الإشعارات" if not notifications_active else "إيقاف الإشعارات"
+            
+            now = time.time()
+            if not backup_active:
+                backup_status = "🔴 الباك اب: مجمد نهائياً"
+            elif now < backup_freeze_until:
+                remaining_sec = int(backup_freeze_until - now)
+                m, s = divmod(remaining_sec, 60)
+                h, m = divmod(m, 60)
+                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+                backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
+            else:
+                backup_status = "🟢 الباك اب: يعمل تلقائياً"
+
+            if not telegraph_active:
+                telegraph_status = "🔴 مزامنة Telegraph: مغلقة"
+            elif now < telegraph_freeze_until:
+                remaining_sec = int(telegraph_freeze_until - now)
+                m, s = divmod(remaining_sec, 60)
+                h, m = divmod(m, 60)
+                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
+                telegraph_status = f"❄️ مزامنة Telegraph: مجمدة (باقي {time_str})"
+            else:
+                telegraph_status = "🟢 مزامنة Telegraph: تعمل تلقائياً"
+
+            keyboard = {
+                "inline_keyboard": [
+                    [{"text": "👨‍💻 إدارة الأدمنز", "callback_data": "cmd:manage_admins"}],
+                    [{"text": "⏳ طلبات معلقة", "callback_data": "cmd:view_pending"}, {"text": "👥 المشتركين", "callback_data": "cmd:view_subs"}],
+                    [{"text": "🚫 المحظورين", "callback_data": "cmd:view_blocked"}, {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}],
+                    [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
+                    [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
+                    [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
+                    [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
+                ]
+            }
+            if "message" in callback:
+                msg_id = callback["message"]["message_id"]
+                requests.post(f"{base_url}/editMessageReplyMarkup", json={
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reply_markup": keyboard
+                })
+
+        elif cmd == "admin_help":
+            help_text = (
+                "❓ **دليل أوامر الأدمن الكاملة لبوت خمسات (Admin & Owner Commands):**\n\n"
+                "👑 **👑 أوامر المالك فقط (Owner Only):**\n"
+                "➕ `/add_admin <id>` — إضافة أدمن جديد\n"
+                "➖ `/remove_admin <id>` — إزالة أدمن\n"
+                "💾 `/backup` — أخذ نسخة احتياطية للملفات يدوياً\n\n"
+                "👮‍♂️ **👮‍♂️ أوامر الإشراف (Admins & Owners):**\n"
+                "💻 `/menu` — فتح لوحة تحكم الأدمن التفاعلية\n"
+                "🆔 `/ids` — عرض معرفات (IDs) المشتركين المسجلين\n"
+                "✅ `/approve <id>` — قبول مشترك معلق\n"
+                "❌ `/reject <id>` — رفض مشترك معلق\n"
+                "⏳ `/pending` — عرض طلبات الاشتراك المعلقة\n"
+                "🚫 `/block <id>` — حظر مستخدم نهائياً\n"
+                "🔓 `/unblock <id>` — إلغاء حظر مستخدم\n"
+                "📢 `/broadcast <رسالة>` — إرسال بث عام للجميع مع ميزة المسح التفاعلي\n"
+                "🚀 `/send_last <عدد>` — جلب وإرسال عدد من أحدث الطلبات\n"
+                "📊 `/status` — عرض حالة البوت والإحصائيات الحالية للرسائل والباك أب\n"
+                "💾 `/restore` — استعادة البيانات بالرد (Reply) على ملف الباك أب\n"
+                "❄️ `/backup_stop` أو `/backup_freeze` أو `/backup_end` أو `/freeze_backup` — تجميد الباك أب التلقائي (مثال: `/backup_stop 30` للتجميد 30 دقيقة)\n"
+                "🔥 `/backup_resume` أو `/backup_play` أو `/resume_backup` — تشغيل وإلغاء تجميد الباك أب التلقائي"
+            )
+            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"})
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+
+        elif cmd == "admin_broadcast_info":
+            info_text = (
+                "📢 **كيفية إرسال بث رسالة للجميع:**\n\n"
+                "أرسل الأمر متبوعاً بالرسالة التي ترغب في بثها لجميع المشتركين والأدمنز.\n\n"
+                "✍️ **طريقة الإرسال:**\n"
+                "`/broadcast أهلاً بكم، تم إجراء تحديثات جديدة لبوت خمسات!`\n\n"
+                "🗑️ **مسح الرسالة للجميع:**\n"
+                "بمجرد إرسال البث، سيظهر لك زر تفاعلي لحذف الرسالة فوراً من شات جميع من استلمها في حال حدوث خطأ!"
+            )
+            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": info_text, "parse_mode": "Markdown"})
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+
+        elif cmd == "send_last_5":
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "🚀 جاري جلب وإرسال آخر 5 طلبات..."})
+            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⏳ جاري جلب آخر 5 طلبات..."})
+            
+            projects, _, _, _ = fetch_khamsat_projects()
+            if projects:
+                to_send = projects[:5]
+                msg_lines = ["🚀 إليك أحدث 5 طلبات تم طرحها على خمسات:\n"]
+                for p in to_send:
+                    msg_lines.append(f"📝 {p['title']}\n🔗 {p['link']}\n")
+                
+                broadcast_msg = "\n".join(msg_lines)
+                
+                with subscribers_lock:
+                    subs = _load_subscribers()
+                all_targets = subs | _get_all_admins()
+                sent = 0
+                msg_map = {}
+                for target in all_targets:
+                    try:
+                        r = requests.post(f"{base_url}/sendMessage", json={"chat_id": target, "text": broadcast_msg}, timeout=10)
+                        if r.status_code == 200:
+                            sent += 1
+                            data = r.json()
+                            msg_map[str(target)] = data["result"]["message_id"]
+                    except Exception:
+                        pass
+                if msg_map:
+                    _save_broadcast_msgs(msg_map)
+                    kb = {"inline_keyboard": [[{"text": "🗑️ مسح للجميع", "callback_data": "cmd:delete_broadcast"}]]}
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم إرسال الطلبات لـ {sent}/{len(all_targets)} مستخدم.", "reply_markup": kb})
+                else:
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لم يتم إرسال الرسالة لأي شخص."})
+            else:
+                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لم يتم العثور على أي طلبات حالياً."})
+
 # ==============================================================================
 # PARAMETERIZED UPDATE HANDLER & COMMAND ROUTER
 # ==============================================================================
@@ -1446,6 +1852,11 @@ def handle_updates_loop(poll_interval=2):
                     "/backup_resume": 2,
                     "/backup_play":   2,
                     "/backup_menu":   2,
+                    "/telegraph_freeze": 2,
+                    "/telegraph_stop":   2,
+                    "/telegraph_end":    2,
+                    "/telegraph_resume": 2,
+                    "/telegraph_play":   2,
                     "/menu":      2,
                     "/ids":       2,
                     "/broadcast": 2,
@@ -1796,6 +2207,42 @@ def handle_updates_loop(poll_interval=2):
                 elif cmd == "/backup_menu":
                     _send_backup_menu(chat_id)
 
+                elif cmd in ("/telegraph_freeze", "/telegraph_stop", "/telegraph_end"):
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        duration_str = parts[1].strip()
+                        minutes = parse_duration(duration_str)
+                        if minutes is not None:
+                            telegraph_active = True
+                            telegraph_freeze_until = time.time() + minutes * 60
+                            _save_notifications_state()
+                            
+                            h, m = divmod(minutes, 60)
+                            d, h = divmod(h, 24)
+                            time_parts = []
+                            if d > 0: time_parts.append(f"{d} يوم")
+                            if h > 0: time_parts.append(f"{h} ساعة")
+                            if m > 0: time_parts.append(f"{m} دقيقة")
+                            time_desc = " و ".join(time_parts)
+                            
+                            response = f"❄️ تم تجميد مزامنة Telegraph بنجاح لمدة {time_desc}."
+                        else:
+                            response = f"⚠️ صيغة المدة غير صالحة! استخدم أرقاماً بالدقائق (مثال: `{cmd} 30`) أو بالساعات/الأيام (مثال: `2h` أو `1d`)."
+                    else:
+                        telegraph_active = False
+                        telegraph_freeze_until = 0
+                        _save_notifications_state()
+                        response = "🔴 تم تجميد مزامنة Telegraph نهائياً (للأبد) حتى تقوم بتشغيلها مجدداً."
+                        
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": response, "parse_mode": "Markdown"})
+
+                elif cmd in ("/telegraph_resume", "/telegraph_play"):
+                    telegraph_active = True
+                    telegraph_freeze_until = 0
+                    _save_notifications_state()
+                    response = "🟢 تم إلغاء التجميد وتشغيل مزامنة Telegraph بنجاح كل دقيقتين!"
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": response})
+
                 elif cmd == "/pending":
                     with subscribers_lock:
                         pending = _load_pending()
@@ -2008,6 +2455,14 @@ def _periodic_tasks_loop():
             _save_notifications_state()
             _notify_admins("🟢 انتهت مدة تجميد النسخ الاحتياطي التلقائي وتم تفعيله تلقائياً كل 3 دقائق!")
         
+        # Check telegraph freeze expiration
+        global telegraph_active, telegraph_freeze_until
+        if telegraph_freeze_until > 0 and now >= telegraph_freeze_until:
+            telegraph_freeze_until = 0
+            telegraph_active = True
+            _save_notifications_state()
+            _notify_admins("🟢 انتهت مدة تجميد مزامنة Telegraph وتم تفعيلها تلقائياً كل دقيقتين!")
+        
         # 3-minute automatic backups (180 seconds)
         if backup_active and backup_freeze_until == 0:
             if now - last_backup_sent >= 180:
@@ -2114,7 +2569,10 @@ if __name__ == "__main__":
         logger.info("Started Khamsat scraping loop...")
         while True:
             try:
-                check_khamsat()
+                if notifications_active:
+                    check_khamsat()
+                else:
+                    logger.info("Scraping is globally paused (notifications disabled)")
             except Exception as e:
                 logger.error(f"Khamsat scraping loop error: {e}")
             
