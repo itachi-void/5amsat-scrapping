@@ -43,18 +43,27 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 _console_handler = logging.StreamHandler()
 _console_handler.setFormatter(_log_formatter)
-_file_handler = RotatingFileHandler('khamsat_bot.log', maxBytes=2*1024*1024, backupCount=3, encoding='utf-8')
-_file_handler.setFormatter(_log_formatter)
+DATA_DIR = os.getenv("DATA_DIR", ".")
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+try:
+    log_file_path = os.path.join(DATA_DIR, 'khamsat_bot.log')
+    _file_handler = RotatingFileHandler(log_file_path, maxBytes=2*1024*1024, backupCount=3, encoding='utf-8')
+    _file_handler.setFormatter(_log_formatter)
+    logger.addHandler(_file_handler)
+except Exception:
+    pass
 logger.addHandler(_console_handler)
-logger.addHandler(_file_handler)
 logging.getLogger().addHandler(_console_handler)
 
 # =========================
 # CONFIGURATION
 # =========================
 BOT_TOKEN = "8785131188:AAGMhnlUTmrWkblRdmKmVN-UM0dhSwo1pO4"
-OWNER_ID = 1622676655
 URL = "https://khamsat.com/community/requests"
+TELEGRAPH_TOKEN = "2182ffe6168f99027ca825ef33d364abc37cede07f0286aef1b9f993d791"
+TELEGRAPH_PATH = "DB-05-17"
 
 # Premium Proxy Data (مع يوزر وباسورد)
 PROXY_USER = os.getenv("PROXY_USER", "")
@@ -62,27 +71,25 @@ PROXY_PASS = os.getenv("PROXY_PASS", "")
 PREMIUM_PROXY_FILE = "proxyscrape_premium_http_proxies.txt"
 FREE_PROXY_FILES = [
     "free_proxies.txt",
-    "HTTP - 2.txt",
-    "SOCKS4 - 2.txt",
-    "SOCKS5 - 2.txt",
 ]  # بروكسيات مجانية بدون يوزر وباسورد
 
 CHECK_INTERVAL = 15
-SEEN_FILE        = "khamsat_max_id.json"
-SUBSCRIBERS_FILE = "subscribers.json"
-PENDING_FILE     = "pending_subscribers.json"
-BLOCKED_FILE     = "blocked_users.json"
-STATE_FILE       = "bot_state.json"
-LAST_BROADCAST_FILE = "last_broadcast_msgs.json"
-ADMINS_FILE      = "admins.json"
-MUTED_USERS_FILE = "muted_users.json"   # كتم شخصي لكل مشترك
-STATS_FILE       = "bot_stats.json"     # إحصائيات تراكمية
+SEEN_FILE        = os.path.join(DATA_DIR, "khamsat_max_id.json")
+SUBSCRIBERS_FILE = os.path.join(DATA_DIR, "subscribers.json")
+PENDING_FILE     = os.path.join(DATA_DIR, "pending_subscribers.json")
+BLOCKED_FILE     = os.path.join(DATA_DIR, "blocked_users.json")
+STATE_FILE       = os.path.join(DATA_DIR, "bot_state.json")
+LAST_BROADCAST_FILE = os.path.join(DATA_DIR, "last_broadcast_msgs.json")
+ROLES_FILE       = os.path.join(DATA_DIR, "roles.json")
+MUTED_USERS_FILE = os.path.join(DATA_DIR, "muted_users.json")   # كتم شخصي لكل مشترك
+STATS_FILE       = os.path.join(DATA_DIR, "bot_stats.json")     # إحصائيات تراكمية
 premium_proxies = []
 free_proxies    = []
 
-# Rate limiting: chat_id -> last command timestamp
-_rate_limit: dict = {}
-RATE_LIMIT_SECONDS = 3   # حد أدنى بين أوامر المستخدم
+# Rate limiting: {chat_id: last_msg_timestamp}
+_rate_limit_map = {}
+_RATE_LIMIT_SECONDS = 3
+
 
 # Project cache
 _projects_cache: list = []
@@ -201,28 +208,42 @@ def _save_subscribers(subs_set):
     os.replace(tmp_path, SUBSCRIBERS_FILE)
 
 
-def _load_admins():
-    """Load admins from file. Returns a set of ints."""
-    if not os.path.exists(ADMINS_FILE):
-        return set()
+def _load_roles():
+    if not os.path.exists(ROLES_FILE):
+        default_roles = {"owner": 1622676655, "admins": [8064837651]}
+        _save_roles(default_roles)
+        return default_roles
     try:
-        with open(ADMINS_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return {int(x) for x in data}
+        with open(ROLES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
     except Exception:
-        pass
-    return set()
+        return {"owner": 1622676655, "admins": [8064837651]}
+
+def _save_roles(roles_data):
+    tmp_path = ROLES_FILE + ".tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(roles_data, f, indent=4)
+    os.replace(tmp_path, ROLES_FILE)
+
+def get_owner_id():
+    return int(_load_roles().get("owner", 1622676655))
+
+def _load_admins():
+    """Load admins from roles file. Returns a set of ints."""
+    roles = _load_roles()
+    admins_list = roles.get("admins", [])
+    if not isinstance(admins_list, list):
+        admins_list = []
+    return {int(x) for x in admins_list}
 
 def _save_admins(admins_set):
-    """Atomically save admins to disk."""
-    tmp_path = ADMINS_FILE + ".tmp"
-    with open(tmp_path, 'w', encoding='utf-8') as f:
-        json.dump(sorted(admins_set), f)
-    os.replace(tmp_path, ADMINS_FILE)
+    """Atomically save admins to roles disk."""
+    roles = _load_roles()
+    roles["admins"] = sorted(admins_set)
+    _save_roles(roles)
 
 def _get_all_admins():
-    return _load_admins() | {OWNER_ID}
+    return _load_admins() | {get_owner_id()}
 
 
 def _load_pending():
@@ -291,14 +312,13 @@ def _get_stats():
     return {}
 
 
-def _check_rate_limit(chat_id):
-    """Return True if allowed, False if too fast."""
+def _is_rate_limited(chat_id):
     now = time.time()
-    last = _rate_limit.get(chat_id, 0)
-    if now - last < RATE_LIMIT_SECONDS:
-        return False
-    _rate_limit[chat_id] = now
-    return True
+    last = _rate_limit_map.get(chat_id, 0)
+    if now - last < _RATE_LIMIT_SECONDS:
+        return True
+    _rate_limit_map[chat_id] = now
+    return False
 
 
 def _notify_admins(text):
@@ -387,9 +407,87 @@ def _load_broadcast_msgs():
 def is_owner(chat_id):
     """Check if a chat_id is the owner."""
     try:
-        return int(chat_id) == OWNER_ID
+        return int(chat_id) == get_owner_id()
     except (ValueError, TypeError):
         return False
+
+def generate_full_backup():
+    backup_data = {}
+    files_to_backup = {
+        "subscribers": SUBSCRIBERS_FILE,
+        "pending": PENDING_FILE,
+        "blocked": BLOCKED_FILE,
+        "roles": ROLES_FILE,
+        "state": STATE_FILE,
+        "seen": SEEN_FILE,
+        "stats": STATS_FILE,
+        "muted": MUTED_USERS_FILE
+    }
+    for key, fpath in files_to_backup.items():
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    backup_data[key] = json.load(f)
+            except Exception:
+                backup_data[key] = None
+        else:
+            backup_data[key] = None
+    return backup_data
+
+def restore_full_backup(backup_data):
+    files_to_backup = {
+        "subscribers": SUBSCRIBERS_FILE,
+        "pending": PENDING_FILE,
+        "blocked": BLOCKED_FILE,
+        "roles": ROLES_FILE,
+        "state": STATE_FILE,
+        "seen": SEEN_FILE,
+        "stats": STATS_FILE,
+        "muted": MUTED_USERS_FILE
+    }
+    for key, fpath in files_to_backup.items():
+        if key in backup_data and backup_data[key] is not None:
+            tmp = fpath + ".tmp"
+            try:
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump(backup_data[key], f, indent=4)
+                os.replace(tmp, fpath)
+            except Exception as e:
+                logger.error(f"Failed to restore {key}: {e}")
+
+last_uploaded_db_hash = None
+def download_telegraph_db():
+    try:
+        r = requests.get(f'https://api.telegra.ph/getPage/{TELEGRAPH_PATH}?return_content=true').json()
+        if not r.get("ok"): return
+        content = r['result']['content'][0]['children'][0]
+        if content and content.startswith("{"):
+            backup_data = json.loads(content)
+            restore_full_backup(backup_data)
+            logger.info("Successfully restored state from Telegraph DB!")
+    except Exception as e:
+        logger.error(f"Failed to download Telegraph DB: {e}")
+
+def telegraph_sync_thread():
+    global last_uploaded_db_hash
+    while True:
+        try:
+            backup_data = generate_full_backup()
+            db_str = json.dumps(backup_data)
+            db_hash = hash(db_str)
+            if db_hash != last_uploaded_db_hash:
+                content = [{"tag":"p", "children":[db_str]}]
+                r = requests.post(f'https://api.telegra.ph/editPage/{TELEGRAPH_PATH}', json={
+                    'access_token': TELEGRAPH_TOKEN,
+                    'title': 'DB',
+                    'content': json.dumps(content)
+                }).json()
+                if r.get("ok"):
+                    last_uploaded_db_hash = db_hash
+                    logger.info("Successfully synced state to Telegraph DB!")
+        except Exception as e:
+            pass
+        time.sleep(120)
 
 def load_proxies():
     """تحميل البروكسيات من الملفات"""
@@ -886,25 +984,32 @@ def _handle_menu_action(base_url, chat_id, action):
 
     elif action == "help":
         help_text = (
-            "🤖 أوامر البوت:\n\n"
-            "👑 أوامر المالك:\n"
-            "/menu - لوحة التحكم\n"
-            "/ids - عرض كل المشتركين\n"
-            "/add_admin <id> - إضافة أدمن\n"
-            "/remove_admin <id> - إزالة أدمن\n"
-            "/block <id> - حظر مستخدم\n"
-            "/unblock <id> - إلغاء حظر\n"
-            "/broadcast <رسالة> - إرسال رسالة للكل\n"
-            "/send_last <رقم> - إرسال آخر الطلبات للكل\n\n"
-            "⚙️ أوامر الأدمن:\n"
-            "/approve <id> - قبول مشترك\n"
-            "/reject <id> - رفض مشترك\n"
-            "/pending - الطلبات المعلقة\n"
-            "/status - حالة البوت\n\n"
-            "👤 أوامر عامة:\n"
-            "/start - طلب اشتراك\n"
-            "/unsubscribe - إلغاء اشتراك\n"
-            "/ping - فحص البوت"
+            "🤖 أوامر البوت — نظام الرولز:\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "👑 المالك (Owner) فقط:\n"
+            "  /menu — لوحة التحكم\n"
+            "  /ids — عرض المشتركين\n"
+            "  /add_admin <id> — إضافة أدمن\n"
+            "  /remove_admin <id> — إزالة أدمن\n"
+            "  /block <id> — حظر مستخدم\n"
+            "  /unblock <id> — إلغاء حظر\n"
+            "  /broadcast <رسالة> — بث رسالة للكل\n"
+            "  /send_last <رقم> — إرسال آخر الطلبات\n"
+            "  /backup — إنشاء نسخة احتياطية\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "⚙️ الأدمن (Admin) + المالك:\n"
+            "  /approve <id> — قبول مشترك\n"
+            "  /reject <id> — رفض مشترك\n"
+            "  /pending — الطلبات المعلقة\n"
+            "  /status — حالة البوت\n"
+            "  /restore — استعادة باك أب (رد على الملف)\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "👤 المشترك العادي:\n"
+            "  /start — طلب اشتراك\n"
+            "  /mymute — كتم إشعاراتك\n"
+            "  /myunmute — تفعيل إشعاراتك\n"
+            "  /unsubscribe — إلغاء الاشتراك\n"
+            "  /ping — فحص البوت"
         )
         keyboard = {"inline_keyboard": [[{"text": "🔙 القائمة", "callback_data": "cmd:menu"}]]}
         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": help_text, "reply_markup": keyboard})
@@ -997,7 +1102,7 @@ def handle_updates_loop(poll_interval=1):
                         # Answer callback to remove loading state
                         requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": answer_text or "✅"})
                     else:
-                        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "⚠️ غير مصرح لك"})
+                        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "هنهذر ولا اي"})
                     continue
 
                 msg = upd.get("message") or upd.get("edited_message")
@@ -1010,38 +1115,84 @@ def handle_updates_loop(poll_interval=1):
                     continue
 
                 text = text.strip()
-
-                # Rate limiting
-                if not is_admin(chat_id) and not _check_rate_limit(chat_id):
+                if not text.startswith("/"):
                     continue
 
-                if text.startswith("/start") or text.startswith("/subscribe"):
-                    # Admins auto-approve themselves
-                    if is_admin(chat_id):
-                        add_subscriber(chat_id)
-                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ تم تفعيل اشتراكك (أدمن)."})
-                        if is_owner(chat_id):
-                            _send_admin_menu(base_url, chat_id)
-                    else:
-                        from_user = msg.get("from", {})
-                        username = from_user.get("username", "")
-                        first_name = from_user.get("first_name", "") or "مستخدم"
-                        result = request_subscription(chat_id, username, first_name)
-                        if result == "pending":
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"مرحباً {first_name}! ⛳ تم إرسال طلب اشتراكك للأدمن. انتظر الموافقة."})
-                        elif result == "already_approved":
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ أنت مشترك بالفعل!"})
-                        elif result == "already_pending":
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⏳ طلبك قيد المراجعة بالفعل. انتظر الموافقة."})
-                        elif result == "blocked":
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🚫 تم حظرك من استخدام هذا البوت."})
-                        else:
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ حدث خطأ. حاول مرة أخرى."})
+                # التحقق من صلاحيات الأوامر بنظام cmd_roles
+                cmd = text.split()[0].split("@")[0].lower() if text else ""
 
-                elif text.startswith("/menu") and is_owner(chat_id):
+                # حدد رول المستخدم
+                role = 1  # 1: User
+                if is_owner(chat_id):
+                    role = 3
+                elif is_admin(chat_id):
+                    role = 2
+
+                # 3 = Owner only | 2 = Admin + Owner | 1 = Everyone
+                cmd_roles = {
+                    # --- Owner Only ---
+                    "/add_admin":    3,
+                    "/remove_admin": 3,
+                    "/backup":       3,
+
+                    # --- Admin + Owner ---
+                    "/restore":   2,
+                    "/menu":      2,
+                    "/ids":       2,
+                    "/broadcast": 2,
+                    "/send_last": 2,
+                    "/block":     2,
+                    "/unblock":   2,
+                    "/approve":   2,
+                    "/reject":    2,
+                    "/pending":   2,
+                    "/status":    2,
+
+                    # --- All Users ---
+                    "/start":       1,
+                    "/subscribe":   1,
+                    "/unsubscribe": 1,
+                    "/mymute":      1,
+                    "/pause":       1,
+                    "/myunmute":    1,
+                    "/resume":      1,
+                    "/ping":        1,
+                    "/help":        1,
+                }
+
+                if cmd in cmd_roles:
+                    if role < cmd_roles[cmd]:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "هنهذر ولا اي"})
+                        continue
+                else:
+                    # Unknown command
+                    continue
+
+                # Rate limiting for non-admins
+                if role == 1 and _is_rate_limited(chat_id):
+                    continue
+
+                if cmd in ("/start", "/subscribe"):
+                    with subscribers_lock:
+                        blocked = _load_blocked()
+                    if chat_id in blocked:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🚫 تم حظرك من استخدام هذا البوت."})
+                        continue
+
+                    # Auto-approve everyone since the bot is free
+                    if add_subscriber(chat_id):
+                        welcome_msg = "لا تنسي الدعاء لنا و لامواتنا و اموات المسلمين\nوصلي علي النبي يا جدع"
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": welcome_msg})
+                    else:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ عذراً، لا يمكن الاشتراك الآن (ربما وصل البوت للحد الأقصى)."})
+
+                    if role >= 2:
+                        _send_admin_menu(base_url, chat_id)
+
+                elif cmd == "/menu":
                     _send_admin_menu(base_url, chat_id)
 
-                elif text.startswith("/approve") and is_admin(chat_id):
+                elif cmd == "/approve":
                     parts = text.split()
                     if len(parts) >= 2:
                         target_id = parts[1].strip()
@@ -1064,7 +1215,7 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /approve <id>"})
 
-                elif text.startswith("/reject") and is_admin(chat_id):
+                elif cmd == "/reject":
                     parts = text.split()
                     if len(parts) >= 2:
                         target_id = parts[1].strip()
@@ -1079,7 +1230,7 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /reject <id>"})
 
-                elif text.startswith("/ids") and is_owner(chat_id):
+                elif cmd == "/ids":
                     with subscribers_lock:
                         subs = _load_subscribers()
                     if subs:
@@ -1091,12 +1242,12 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "📭 لا يوجد مشتركين حالياً."})
 
-                elif text.startswith("/add_admin") and is_owner(chat_id):
+                elif cmd == "/add_admin":
                     parts = text.split()
                     if len(parts) >= 2:
                         try:
                             target_id = int(parts[1].strip())
-                            if target_id == OWNER_ID:
+                            if target_id == get_owner_id():
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "أنت المالك بالفعل!"})
                             else:
                                 with subscribers_lock:
@@ -1110,7 +1261,7 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /add_admin <id>"})
 
-                elif text.startswith("/remove_admin") and is_owner(chat_id):
+                elif cmd == "/remove_admin":
                     parts = text.split()
                     if len(parts) >= 2:
                         try:
@@ -1125,12 +1276,12 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /remove_admin <id>"})
 
-                elif text.startswith("/block") and is_owner(chat_id):
+                elif cmd == "/block":
                     parts = text.split()
                     if len(parts) >= 2:
                         try:
                             target_id = int(parts[1].strip())
-                            if target_id == OWNER_ID:
+                            if target_id == get_owner_id():
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لا يمكنك حظر نفسك!"})
                             else:
                                 with subscribers_lock:
@@ -1151,7 +1302,7 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /block <id>"})
 
-                elif text.startswith("/unblock") and is_owner(chat_id):
+                elif cmd == "/unblock":
                     parts = text.split()
                     if len(parts) >= 2:
                         try:
@@ -1166,8 +1317,8 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /unblock <id>"})
 
-                elif text.startswith("/broadcast ") and is_owner(chat_id):
-                    broadcast_msg = text[len("/broadcast "):].strip()
+                elif cmd == "/broadcast":
+                    broadcast_msg = text[len("/broadcast"):].strip()
                     if broadcast_msg:
                         with subscribers_lock:
                             subs = _load_subscribers()
@@ -1193,7 +1344,7 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /broadcast <رسالتك>"})
 
-                elif text.startswith("/send_last") and is_owner(chat_id):
+                elif cmd == "/send_last":
                     parts = text.split()
                     if len(parts) == 2 and parts[1].isdigit():
                         count = int(parts[1])
@@ -1236,14 +1387,14 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /send_last <رقم>\nمثال: /send_last 5"})
 
-                elif text.startswith("/unsubscribe"):
+                elif cmd == "/unsubscribe":
                     remove_subscriber(chat_id)
                     mu = _load_muted_users()
                     mu.discard(chat_id)
                     _save_muted_users(mu)
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ تم إلغاء اشتراكك."})
 
-                elif text.startswith("/mymute"):
+                elif cmd in ("/mymute", "/pause"):
                     with subscribers_lock:
                         subs = _load_subscribers()
                     if chat_id in subs or is_admin(chat_id):
@@ -1254,30 +1405,51 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ أنت لست مشتركاً."})
 
-                elif text.startswith("/myunmute"):
+                elif cmd in ("/myunmute", "/resume"):
                     mu = _load_muted_users()
                     mu.discard(chat_id)
                     _save_muted_users(mu)
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔔 تم إعادة تفعيل إشعاراتك!"})
 
-                elif text.startswith("/backup") and is_owner(chat_id):
-                    files_to_send = [
-                        SUBSCRIBERS_FILE, ADMINS_FILE, BLOCKED_FILE,
-                        PENDING_FILE, STATE_FILE, SEEN_FILE, STATS_FILE
-                    ]
-                    tele_url_doc = f"{base_url}/sendDocument"
-                    sent_backup = 0
-                    for fp in files_to_send:
-                        if os.path.exists(fp):
-                            try:
-                                with open(fp, 'rb') as doc:
-                                    requests.post(tele_url_doc, data={"chat_id": chat_id}, files={"document": doc}, timeout=15)
-                                sent_backup += 1
-                            except Exception:
-                                pass
-                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم إرسال {sent_backup} ملف باكاب."})
+                elif cmd == "/backup":
+                    try:
+                        backup_data = generate_full_backup()
+                        backup_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
+                        import io
+                        bio = io.BytesIO(backup_bytes)
+                        bio.name = "backup_data.json"
+                        requests.post(
+                            f"{base_url}/sendDocument",
+                            data={"chat_id": chat_id, "caption": "💾 نسخة احتياطية كاملة — استخدم /restore بالرد على هذا الملف لاستعادة البيانات."},
+                            files={"document": ("backup_data.json", bio, "application/json")},
+                            timeout=20
+                        )
+                    except Exception as _be:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"⚠️ فشل إنشاء الباك أب: {_be}"})
 
-                elif text.startswith("/pending") and is_admin(chat_id):
+                elif cmd == "/restore":
+                    # Must reply to a backup_data.json document
+                    replied = msg.get("reply_to_message", {})
+                    doc = replied.get("document", {})
+                    file_id = doc.get("file_id")
+                    if not file_id:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ استخدم /restore بالرد (Reply) على ملف الباك أب الذي أرسله البوت."})
+                    else:
+                        try:
+                            # Get file path from Telegram
+                            r_fp = requests.get(f"{base_url}/getFile", params={"file_id": file_id}, timeout=10).json()
+                            if not r_fp.get("ok"):
+                                raise Exception("getFile failed")
+                            tg_path = r_fp["result"]["file_path"]
+                            r_dl = requests.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{tg_path}", timeout=20)
+                            backup_data = json.loads(r_dl.content.decode("utf-8"))
+                            restore_full_backup(backup_data)
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ تم استعادة جميع البيانات بنجاح! 🎉"})
+                            logger.info(f"Full restore triggered by {chat_id}")
+                        except Exception as _re:
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"❌ فشل الاستعادة: {_re}"})
+
+                elif cmd == "/pending":
                     with subscribers_lock:
                         pending = _load_pending()
                     if pending:
@@ -1288,56 +1460,67 @@ def handle_updates_loop(poll_interval=1):
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ لا توجد طلبات معلقة."})
 
-                elif text.startswith("/help"):
-                    if is_owner(chat_id):
+                elif cmd == "/help":
+                    if role >= 3:
                         help_text = (
-                            "🤖 أوامر البوت:\n\n"
-                            "👑 أوامر المالك:\n"
-                            "/ids - عرض كل المشتركين\n"
-                            "/add_admin <id> - إضافة أدمن\n"
-                            "/remove_admin <id> - إزالة أدمن\n"
-                            "/block <id> - حظر مستخدم\n"
-                            "/unblock <id> - إلغاء حظر\n"
-                            "/broadcast <رسالة> - إرسال للكل\n"
-                            "/backup - نسخة احتياطية\n\n"
-                            "⚙️ أوامر الأدمن:\n"
-                            "/approve <id> - قبول مشترك\n"
-                            "/reject <id> - رفض مشترك\n"
-                            "/pending - الطلبات المعلقة\n"
-                            "/status - حالة البوت\n\n"
-                            "👤 أوامر عامة:\n"
-                            "/start - طلب اشتراك\n"
-                            "/mymute - كتم إشعاراتك مؤقتاً\n"
-                            "/myunmute - تفعيل إشعاراتك\n"
-                            "/unsubscribe - إلغاء اشتراك\n"
-                            "/ping - فحص البوت"
+                            "🤖 أوامر البوت — نظام الرولز:\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "👑 المالك (Owner) فقط:\n"
+                            "  /menu — لوحة التحكم\n"
+                            "  /ids — عرض المشتركين\n"
+                            "  /add_admin <id> — إضافة أدمن\n"
+                            "  /remove_admin <id> — إزالة أدمن\n"
+                            "  /block <id> — حظر مستخدم\n"
+                            "  /unblock <id> — إلغاء حظر\n"
+                            "  /broadcast <رسالة> — بث رسالة للكل\n"
+                            "  /send_last <رقم> — إرسال آخر الطلبات\n"
+                            "  /backup — إنشاء نسخة احتياطية\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "⚙️ الأدمن (Admin) + المالك:\n"
+                            "  /approve <id> — قبول مشترك\n"
+                            "  /reject <id> — رفض مشترك\n"
+                            "  /pending — الطلبات المعلقة\n"
+                            "  /status — حالة البوت\n"
+                            "  /restore — استعادة باك أب (رد على الملف)\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "👤 المشترك العادي:\n"
+                            "  /start — طلب اشتراك\n"
+                            "  /mymute — كتم إشعاراتك\n"
+                            "  /myunmute — تفعيل إشعاراتك\n"
+                            "  /unsubscribe — إلغاء الاشتراك\n"
+                            "  /ping — فحص البوت"
                         )
-                    elif is_admin(chat_id):
+                    elif role >= 2:
                         help_text = (
-                            "🤖 أوامر البوت:\n\n"
-                            "⚙️ أوامر الأدمن:\n"
-                            "/approve <id> - قبول مشترك\n"
-                            "/reject <id> - رفض مشترك\n"
-                            "/pending - الطلبات المعلقة\n"
-                            "/status - حالة البوت\n\n"
-                            "👤 أوامر عامة:\n"
-                            "/mymute - كتم إشعاراتك\n"
-                            "/myunmute - تفعيل إشعاراتك\n"
-                            "/unsubscribe - إلغاء اشتراك\n"
-                            "/ping - فحص البوت"
+                            "🤖 أوامر البوت — نظام الرولز:\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "⚙️ الأدمن (Admin):\n"
+                            "  /approve <id> — قبول مشترك\n"
+                            "  /reject <id> — رفض مشترك\n"
+                            "  /pending — الطلبات المعلقة\n"
+                            "  /status — حالة البوت\n"
+                            "  /restore — استعادة باك أب (رد على الملف)\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "👤 المشترك العادي:\n"
+                            "  /mymute — كتم إشعاراتك\n"
+                            "  /myunmute — تفعيل إشعاراتك\n"
+                            "  /unsubscribe — إلغاء الاشتراك\n"
+                            "  /ping — فحص البوت"
                         )
                     else:
                         help_text = (
-                            "🤖 أوامر البوت:\n\n"
-                            "/start - طلب اشتراك\n"
-                            "/mymute - كتم إشعاراتك مؤقتاً\n"
-                            "/myunmute - تفعيل إشعاراتك\n"
-                            "/unsubscribe - إلغاء اشتراك\n"
-                            "/ping - فحص البوت"
+                            "🤖 أوامر البوت:\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "👤 أوامر عامة:\n"
+                            "  /start — طلب اشتراك\n"
+                            "  /mymute — كتم إشعاراتك\n"
+                            "  /myunmute — تفعيل إشعاراتك\n"
+                            "  /unsubscribe — إلغاء الاشتراك\n"
+                            "  /ping — فحص البوت"
                         )
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": help_text})
 
-                elif text.startswith("/status") and is_admin(chat_id):
+                elif cmd == "/status":
                     with subscribers_lock:
                         subs = _load_subscribers()
                         pending = _load_pending()
@@ -1359,7 +1542,7 @@ def handle_updates_loop(poll_interval=1):
                     )
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": status_msg})
 
-                elif text.startswith("/ping"):
+                elif cmd == "/ping":
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "pong ✅"})
 
         except Exception as e:
@@ -1461,39 +1644,74 @@ def seed_max_id(projects):
         logger.info(f"Startup baseline set: max_seen_id = {max_seen_id}")
 
 
-def _weekly_stats_thread():
-    """Send weekly stats report to owner every 7 days."""
+def _periodic_tasks_loop():
+    """Send daily backups and weekly stats report to owner."""
     WEEK = 7 * 24 * 3600
+    DAY = 24 * 3600
+    time.sleep(60)  # Wait 1 min after startup
+    last_stats_time = time.time()
+    last_backup_time = time.time()
     while True:
-        time.sleep(WEEK)
-        try:
-            with subscribers_lock:
-                subs = _load_subscribers()
-                pending = _load_pending()
-                blocked = _load_blocked()
-            stats = _get_stats()
-            uptime_sec = int(time.time() - bot_start_time)
-            h, m = divmod(uptime_sec // 60, 60)
-            msg = (
-                f"📅 التقرير الأسبوعي:\n"
-                f"⏱️ وقت التشغيل: {h}س {m}د\n"
-                f"👥 المشتركين: {len(subs)}/{MAX_SUBSCRIBERS}\n"
-                f"⏳ طلبات معلقة: {len(pending)}\n"
-                f"🚫 محظورين: {len(blocked)}\n"
-                f"🔢 أعلى ID طلب: {max_seen_id}\n"
-                f"📨 إجمالي رسائل مرسلة: {stats.get('total_sent', 0)}"
-            )
-            _notify_admins(msg)
-        except Exception as e:
-            logger.error(f"Weekly stats error: {e}")
+        time.sleep(3600)  # Check every hour
+        now = time.time()
+
+        # Daily backup
+        if now - last_backup_time >= DAY:
+            try:
+                backup_data = generate_full_backup()
+                backup_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
+                import io
+                bio = io.BytesIO(backup_bytes)
+                bio.name = "backup_data.json"
+                requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument",
+                    data={"chat_id": get_owner_id(), "caption": "💾 نسخة احتياطية يومية تلقائية.\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
+                    files={"document": ("backup_data.json", bio, "application/json")},
+                    timeout=20
+                )
+                last_backup_time = now
+                logger.info("Daily backup sent to owner")
+            except Exception as e:
+                logger.error(f"Daily backup error: {e}")
+
+        # Weekly stats
+        if now - last_stats_time >= WEEK:
+            try:
+                with subscribers_lock:
+                    subs = _load_subscribers()
+                    pending = _load_pending()
+                    blocked = _load_blocked()
+                stats = _get_stats()
+                uptime_sec = int(time.time() - bot_start_time)
+                h, m_min = divmod(uptime_sec // 60, 60)
+                muted_count = len(_load_muted_users())
+                msg = (
+                    f"📅 التقرير الأسبوعي:\n"
+                    f"⏱️ وقت التشغيل: {h}س {m_min}د\n"
+                    f"👥 المشتركين: {len(subs)}/{MAX_SUBSCRIBERS}\n"
+                    f"🔕 كتموا إشعاراتهم: {muted_count}\n"
+                    f"⏳ طلبات معلقة: {len(pending)}\n"
+                    f"🚫 محظورين: {len(blocked)}\n"
+                    f"🔢 أعلى ID طلب: {max_seen_id}\n"
+                    f"📨 إجمالي رسائل مرسلة: {stats.get('total_sent', 0)}"
+                )
+                _notify_admins(msg)
+                last_stats_time = now
+            except Exception as e:
+                logger.error(f"Weekly stats error: {e}")
 
 # =========================
 # START
 # =========================
 if __name__ == "__main__":
+    download_telegraph_db()
+
     # تحميل أعلى ID شوفناه من قبل
     max_seen_id = _load_max_id()
     logger.info(f"Loaded max_seen_id = {max_seen_id}")
+
+    # تحميل البروكسيات
+    load_proxies()
 
     logger.info("=" * 50)
     logger.info("Khamsat bot started")
@@ -1503,13 +1721,26 @@ if __name__ == "__main__":
     if BOT_TOKEN:
         t = threading.Thread(target=handle_updates_loop, kwargs={"poll_interval": 2}, daemon=True)
         t.start()
-        tw = threading.Thread(target=_weekly_stats_thread, daemon=True)
+        tw = threading.Thread(target=_periodic_tasks_loop, daemon=True)
         tw.start()
+        t3 = threading.Thread(target=telegraph_sync_thread, daemon=True)
+        t3.start()
 
     if not BOT_TOKEN:
         logger.warning("BOT_TOKEN is missing - Telegram sending is disabled")
     else:
         send_telegram("🚀 بدأت مراقبة طلبات 'خمسات' الآن..")
+        owner_startup_msg = (
+            "🚀 تم تشغيل البوت!\n\n"
+            "لو حسيت إن الداتا طارت بسبب ريستارت السيرفر، مفيش مشكلة.\n"
+            "اعمل Reply على آخر ملف نسخ احتياطي أرسلتهولك، واكتب أمر:\n"
+            "/restore\n\n"
+            "والداتا كلها هترجع في ثانية واحدة."
+        )
+        try:
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": get_owner_id(), "text": owner_startup_msg}, timeout=10)
+        except Exception:
+            pass
 
     # جلب الطلبات الحالية وتسجيل أعلى ID (بدون إرسال إشعارات عنها)
     startup_projects, startup_proxy_type, startup_proxy_addr = fetch_mostaql_projects()
