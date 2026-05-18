@@ -5,52 +5,38 @@ import time
 import random
 import requests
 import logging
-import importlib.util
-import importlib
-from bs4 import BeautifulSoup
 import threading
 from logging.handlers import RotatingFileHandler
 
 # Sync Locks and Shared Objects
 subscribers_lock = threading.Lock()
-seen_ids_lock = threading.Lock()
 max_seen_id_lock = threading.Lock()
 
 MAX_SUBSCRIBERS = 50
 
-# Rate limiting map: {(bot_type, chat_id): last_msg_timestamp}
+# Rate limiting map: {chat_id: last_msg_timestamp}
 _rate_limit_map = {}
 _RATE_LIMIT_SECONDS = 3
 
-# Project caches
-_mostaql_project_cache = {"data": [], "ts": 0}
+# Project cache
 _khamsat_project_cache = {"data": [], "ts": 0}
-MOSTAQL_CACHE_TTL = 30
 KHAMSAT_CACHE_TTL = 20
 
-# Backoff states
-backoff_until_mostaql = 0
+# Backoff state
 backoff_until_khamsat = 0
-deep_scan_counter_mostaql = 0
 deep_scan_counter_khamsat = 0
 
 # Uptime baseline
 bot_start_time = time.time()
 
-# Configurations & Tokens (Auto-loaded from .env files)
-MOSTAQL_BOT_TOKEN = None
+# Configurations & Tokens (Auto-loaded from .env)
 KHAMSAT_BOT_TOKEN = None
-
-TELEGRAPH_TOKEN_MOSTAQL = "c8bb576ff4e83bab9ecf8711741738ffab9e8a428145ca0a69c6fbc69004"
-TELEGRAPH_PATH_MOSTAQL = "DB-05-17-2"
-
 TELEGRAPH_TOKEN_KHAMSAT = "2182ffe6168f99027ca825ef33d364abc37cede07f0286aef1b9f993d791"
 TELEGRAPH_PATH_KHAMSAT = "DB-05-17"
 
 PROXY_USER = ""
 PROXY_PASS = ""
 
-CHECK_INTERVAL_MOSTAQL = 45
 DATA_DIR = os.getenv("DATA_DIR", ".")
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -97,33 +83,20 @@ scraper = _new_scraper()
 # ENVIRONMENT AND CONFIG DYNAMIC LOADER
 # ==============================================================================
 def load_all_configs():
-    """Dynamically load configs from both workspace .env files."""
-    global MOSTAQL_BOT_TOKEN, KHAMSAT_BOT_TOKEN, PROXY_USER, PROXY_PASS, DATA_DIR
+    """Dynamically load configs from environment or local .env file."""
+    global KHAMSAT_BOT_TOKEN, PROXY_USER, PROXY_PASS, TELEGRAPH_TOKEN_KHAMSAT, TELEGRAPH_PATH_KHAMSAT
     
-    # Check current env vars first
-    MOSTAQL_BOT_TOKEN = os.getenv("MOSTAQL_BOT_TOKEN")
-    KHAMSAT_BOT_TOKEN = os.getenv("KHAMSAT_BOT_TOKEN")
+    KHAMSAT_BOT_TOKEN = os.getenv("BOT_TOKEN")
     PROXY_USER = os.getenv("PROXY_USER", "")
     PROXY_PASS = os.getenv("PROXY_PASS", "")
+    TELEGRAPH_TOKEN_KHAMSAT = os.getenv("TELEGRAPH_TOKEN", TELEGRAPH_TOKEN_KHAMSAT)
+    TELEGRAPH_PATH_KHAMSAT = os.getenv("TELEGRAPH_PATH", TELEGRAPH_PATH_KHAMSAT)
 
-    # Mostaql .env path
-    mostaql_env = "C:\\Users\\itachi\\Downloads\\mostaql scrapping\\.env"
-    if os.path.exists(mostaql_env):
-        with open(mostaql_env, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    k, v = k.strip(), v.strip().strip('"').strip("'")
-                    if k == "BOT_TOKEN" and not MOSTAQL_BOT_TOKEN:
-                        MOSTAQL_BOT_TOKEN = v
-                    elif k == "PROXY_USER" and not PROXY_USER:
-                        PROXY_USER = v
-                    elif k == "PROXY_PASS" and not PROXY_PASS:
-                        PROXY_PASS = v
-
-    # Khamsat .env path
+    # Local .env path
     khamsat_env = "C:\\Users\\itachi\\Downloads\\5amsat-scrapping\\.env"
+    if not os.path.exists(khamsat_env):
+        khamsat_env = ".env"
+        
     if os.path.exists(khamsat_env):
         with open(khamsat_env, "r", encoding="utf-8") as f:
             for line in f:
@@ -131,16 +104,18 @@ def load_all_configs():
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     k, v = k.strip(), v.strip().strip('"').strip("'")
-                    if k == "BOT_TOKEN" and not KHAMSAT_BOT_TOKEN:
+                    if k == "BOT_TOKEN":
                         KHAMSAT_BOT_TOKEN = v
+                    elif k == "PROXY_USER":
+                        PROXY_USER = v
+                    elif k == "PROXY_PASS":
+                        PROXY_PASS = v
+                    elif k == "TELEGRAPH_TOKEN":
+                        TELEGRAPH_TOKEN_KHAMSAT = v
+                    elif k == "TELEGRAPH_PATH":
+                        TELEGRAPH_PATH_KHAMSAT = v
 
-    # Fallback to local .env if any token is still empty
-    if not MOSTAQL_BOT_TOKEN:
-        MOSTAQL_BOT_TOKEN = os.getenv("BOT_TOKEN")
-    if not KHAMSAT_BOT_TOKEN:
-        KHAMSAT_BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-    logger.info(f"Config loaded: Mostaql Token={'Loaded' if MOSTAQL_BOT_TOKEN else 'Missing'}, Khamsat Token={'Loaded' if KHAMSAT_BOT_TOKEN else 'Missing'}")
+    logger.info(f"Config loaded: Khamsat Token={'Loaded' if KHAMSAT_BOT_TOKEN else 'Missing'}")
 
 # ==============================================================================
 # PROXY CONSOLIDATION POOL LOADER
@@ -195,23 +170,23 @@ def load_proxies():
 # ==============================================================================
 # PARAMETERIZED DATA STORAGE ACCESS LAYER
 # ==============================================================================
-def _get_file_path(bot_type, file_key):
-    """Retrieve isolated path prefixing bot_type to prevent database collisions."""
+def _get_file_path(file_key):
+    """Retrieve isolated path prefixing 'khamsat_' to keep existing databases intact."""
     names = {
         "subscribers": "subscribers.json",
         "pending": "pending_subscribers.json",
         "blocked": "blocked_users.json",
         "roles": "roles.json",
         "state": "bot_state.json",
-        "seen": "seen_ids.json" if bot_type == "mostaql" else "max_id.json",
+        "seen": "max_id.json",
         "muted": "muted_users.json",
         "stats": "bot_stats.json",
         "last_broadcast": "last_broadcast_msgs.json"
     }
-    return os.path.join(DATA_DIR, f"{bot_type}_{names[file_key]}")
+    return os.path.join(DATA_DIR, f"khamsat_{names[file_key]}")
 
-def _load_subscribers(bot_type):
-    file_path = _get_file_path(bot_type, "subscribers")
+def _load_subscribers():
+    file_path = _get_file_path("subscribers")
     if not os.path.exists(file_path):
         return set()
     try:
@@ -223,18 +198,18 @@ def _load_subscribers(bot_type):
         pass
     return set()
 
-def _save_subscribers(bot_type, subs_set):
-    file_path = _get_file_path(bot_type, "subscribers")
+def _save_subscribers(subs_set):
+    file_path = _get_file_path("subscribers")
     tmp_path = file_path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(sorted(subs_set), f)
     os.replace(tmp_path, file_path)
 
-def _load_roles(bot_type):
-    file_path = _get_file_path(bot_type, "roles")
+def _load_roles():
+    file_path = _get_file_path("roles")
     if not os.path.exists(file_path):
         default_roles = {"owner": 1622676655, "admins": [8064837651]}
-        _save_roles(bot_type, default_roles)
+        _save_roles(default_roles)
         return default_roles
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -242,33 +217,33 @@ def _load_roles(bot_type):
     except Exception:
         return {"owner": 1622676655, "admins": [8064837651]}
 
-def _save_roles(bot_type, roles_data):
-    file_path = _get_file_path(bot_type, "roles")
+def _save_roles(roles_data):
+    file_path = _get_file_path("roles")
     tmp_path = file_path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(roles_data, f, indent=4)
     os.replace(tmp_path, file_path)
 
-def get_owner_id(bot_type):
-    return int(_load_roles(bot_type).get("owner", 1622676655))
+def get_owner_id():
+    return int(_load_roles().get("owner", 1622676655))
 
-def _load_admins(bot_type):
-    roles = _load_roles(bot_type)
+def _load_admins():
+    roles = _load_roles()
     admins_list = roles.get("admins", [])
     if not isinstance(admins_list, list):
         admins_list = []
     return {int(x) for x in admins_list}
 
-def _save_admins(bot_type, admins_set):
-    roles = _load_roles(bot_type)
+def _save_admins(admins_set):
+    roles = _load_roles()
     roles["admins"] = sorted(admins_set)
-    _save_roles(bot_type, roles)
+    _save_roles(roles)
 
-def _get_all_admins(bot_type):
-    return _load_admins(bot_type) | {get_owner_id(bot_type)}
+def _get_all_admins():
+    return _load_admins() | {get_owner_id()}
 
-def _load_pending(bot_type):
-    file_path = _get_file_path(bot_type, "pending")
+def _load_pending():
+    file_path = _get_file_path("pending")
     if not os.path.exists(file_path):
         return set()
     try:
@@ -280,15 +255,15 @@ def _load_pending(bot_type):
         pass
     return set()
 
-def _save_pending(bot_type, pending_set):
-    file_path = _get_file_path(bot_type, "pending")
+def _save_pending(pending_set):
+    file_path = _get_file_path("pending")
     tmp_path = file_path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(sorted(pending_set), f)
     os.replace(tmp_path, file_path)
 
-def _load_blocked(bot_type):
-    file_path = _get_file_path(bot_type, "blocked")
+def _load_blocked():
+    file_path = _get_file_path("blocked")
     if not os.path.exists(file_path):
         return set()
     try:
@@ -300,15 +275,15 @@ def _load_blocked(bot_type):
         pass
     return set()
 
-def _save_blocked(bot_type, blocked_set):
-    file_path = _get_file_path(bot_type, "blocked")
+def _save_blocked(blocked_set):
+    file_path = _get_file_path("blocked")
     tmp_path = file_path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(sorted(blocked_set), f)
     os.replace(tmp_path, file_path)
 
-def _load_muted_users(bot_type):
-    file_path = _get_file_path(bot_type, "muted")
+def _load_muted_users():
+    file_path = _get_file_path("muted")
     if not os.path.exists(file_path):
         return set()
     try:
@@ -320,15 +295,15 @@ def _load_muted_users(bot_type):
         pass
     return set()
 
-def _save_muted_users(bot_type, muted_set):
-    file_path = _get_file_path(bot_type, "muted")
+def _save_muted_users(muted_set):
+    file_path = _get_file_path("muted")
     tmp_path = file_path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(sorted(muted_set), f)
     os.replace(tmp_path, file_path)
 
-def _get_stats(bot_type):
-    file_path = _get_file_path(bot_type, "stats")
+def _get_stats():
+    file_path = _get_file_path("stats")
     try:
         if os.path.exists(file_path):
             with open(file_path, 'r', encoding='utf-8') as f:
@@ -337,23 +312,23 @@ def _get_stats(bot_type):
         pass
     return {}
 
-def _save_stats(bot_type, stats_data):
-    file_path = _get_file_path(bot_type, "stats")
+def _save_stats(stats_data):
+    file_path = _get_file_path("stats")
     tmp_path = file_path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(stats_data, f, indent=4)
     os.replace(tmp_path, file_path)
 
-def _increment_stats(bot_type, sent_count):
+def _increment_stats(sent_count):
     if sent_count <= 0:
         return
     with subscribers_lock:
-        s = _get_stats(bot_type)
+        s = _get_stats()
         s["total_sent"] = s.get("total_sent", 0) + sent_count
-        _save_stats(bot_type, s)
+        _save_stats(s)
 
-def _load_broadcast_msgs(bot_type):
-    file_path = _get_file_path(bot_type, "last_broadcast")
+def _load_broadcast_msgs():
+    file_path = _get_file_path("last_broadcast")
     if not os.path.exists(file_path):
         return {}
     try:
@@ -363,22 +338,39 @@ def _load_broadcast_msgs(bot_type):
         pass
     return {}
 
-def _save_broadcast_msgs(bot_type, msg_map):
-    file_path = _get_file_path(bot_type, "last_broadcast")
+def _save_broadcast_msgs(msg_map):
+    file_path = _get_file_path("last_broadcast")
     tmp_path = file_path + ".tmp"
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(msg_map, f, indent=4)
     os.replace(tmp_path, file_path)
 
+def _load_keywords():
+    file_path = _get_file_path("keywords")
+    if not os.path.exists(file_path):
+        return {}
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_keywords(keywords_dict):
+    file_path = _get_file_path("keywords")
+    tmp_path = file_path + ".tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(keywords_dict, f, indent=4, ensure_ascii=False)
+    os.replace(tmp_path, file_path)
+
 # ==============================================================================
 # SUBSCRIBER MUTATION ENGINE
 # ==============================================================================
-def add_subscriber(bot_type, chat_id):
+def add_subscriber(chat_id):
     """Add user to subscribers list (max limit of 50 enforced)."""
     with subscribers_lock:
-        subs = _load_subscribers(bot_type)
-        pending = _load_pending(bot_type)
-        blocked = _load_blocked(bot_type)
+        subs = _load_subscribers()
+        pending = _load_pending()
+        blocked = _load_blocked()
         
         if chat_id in blocked:
             return False
@@ -388,62 +380,61 @@ def add_subscriber(bot_type, chat_id):
             
         if len(subs) >= MAX_SUBSCRIBERS:
             pending.add(chat_id)
-            _save_pending(bot_type, pending)
+            _save_pending(pending)
             return False
             
         subs.add(chat_id)
-        _save_subscribers(bot_type, subs)
+        _save_subscribers(subs)
         pending.discard(chat_id)
-        _save_pending(bot_type, pending)
+        _save_pending(pending)
         return True
 
-def remove_subscriber(bot_type, chat_id):
+def remove_subscriber(chat_id):
     with subscribers_lock:
-        subs = _load_subscribers(bot_type)
+        subs = _load_subscribers()
         subs.discard(chat_id)
-        _save_subscribers(bot_type, subs)
+        _save_subscribers(subs)
         
-        pending = _load_pending(bot_type)
+        pending = _load_pending()
         pending.discard(chat_id)
-        _save_pending(bot_type, pending)
+        _save_pending(pending)
 
-def reject_subscriber(bot_type, chat_id):
+def reject_subscriber(chat_id):
     with subscribers_lock:
-        pending = _load_pending(bot_type)
+        pending = _load_pending()
         pending.discard(chat_id)
-        _save_pending(bot_type, pending)
+        _save_pending(pending)
         
-        subs = _load_subscribers(bot_type)
+        subs = _load_subscribers()
         subs.discard(chat_id)
-        _save_subscribers(bot_type, subs)
+        _save_subscribers(subs)
 
-def is_owner(bot_type, chat_id):
+def is_owner(chat_id):
     try:
-        return int(chat_id) == get_owner_id(bot_type)
+        return int(chat_id) == get_owner_id()
     except (ValueError, TypeError):
         return False
 
-def is_admin(bot_type, chat_id):
+def is_admin(chat_id):
     try:
         cid = int(chat_id)
-        return cid in _load_admins(bot_type) or cid == get_owner_id(bot_type)
+        return cid in _load_admins() or cid == get_owner_id()
     except (ValueError, TypeError):
         return False
 
-def _notify_admins(bot_type, text):
+def _notify_admins(text):
     """Alert all administrative endpoints of events."""
-    token = MOSTAQL_BOT_TOKEN if bot_type == "mostaql" else KHAMSAT_BOT_TOKEN
-    if not token or not _get_all_admins(bot_type):
+    if not KHAMSAT_BOT_TOKEN or not _get_all_admins():
         return
-    for cid in _get_all_admins(bot_type):
+    for cid in _get_all_admins():
         try:
-            requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": cid, "text": text}, timeout=10)
+            requests.post(f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage", json={"chat_id": cid, "text": text}, timeout=10)
         except Exception:
             pass
 
-def _is_rate_limited(bot_type, chat_id):
+def _is_rate_limited(chat_id):
     now = time.time()
-    key = (bot_type, chat_id)
+    key = chat_id
     last = _rate_limit_map.get(key, 0)
     if now - last < _RATE_LIMIT_SECONDS:
         return True
@@ -453,12 +444,11 @@ def _is_rate_limited(bot_type, chat_id):
 # ==============================================================================
 # TELEGRAM BASE TRANSMITTER
 # ==============================================================================
-def _send_one(bot_type, chat_id, text, reply_markup=None, retries=3):
+def _send_one(chat_id, text, reply_markup=None, retries=3):
     """Send message to user with auto-removal if bot blocked."""
-    token = MOSTAQL_BOT_TOKEN if bot_type == "mostaql" else KHAMSAT_BOT_TOKEN
-    if not token:
+    if not KHAMSAT_BOT_TOKEN:
         return False, None
-    tele_url = f"https://api.telegram.org/bot{token}/sendMessage"
+    tele_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = reply_markup
@@ -468,8 +458,8 @@ def _send_one(bot_type, chat_id, text, reply_markup=None, retries=3):
             if r.status_code == 200:
                 return True, r.json().get("result", {}).get("message_id")
             elif r.status_code == 403:
-                remove_subscriber(bot_type, chat_id)
-                logger.warning(f"Removed user {chat_id} from {bot_type} subscribers (blocked the bot).")
+                remove_subscriber(chat_id)
+                logger.warning(f"Removed user {chat_id} from Khamsat subscribers (blocked the bot).")
                 return False, None
         except Exception:
             pass
@@ -479,20 +469,20 @@ def _send_one(bot_type, chat_id, text, reply_markup=None, retries=3):
 # ==============================================================================
 # TELEGRAPH DATA CLOUD BACKUP INTEGRATION
 # ==============================================================================
-last_uploaded_db_hash_mostaql = None
 last_uploaded_db_hash_khamsat = None
 
-def generate_full_backup(bot_type):
+def generate_full_backup():
     backup_data = {}
     files_to_backup = {
-        "subscribers": _get_file_path(bot_type, "subscribers"),
-        "pending": _get_file_path(bot_type, "pending"),
-        "blocked": _get_file_path(bot_type, "blocked"),
-        "roles": _get_file_path(bot_type, "roles"),
-        "state": _get_file_path(bot_type, "state"),
-        "seen": _get_file_path(bot_type, "seen"),
-        "muted": _get_file_path(bot_type, "muted"),
-        "stats": _get_file_path(bot_type, "stats"),
+        "subscribers": _get_file_path("subscribers"),
+        "pending": _get_file_path("pending"),
+        "blocked": _get_file_path("blocked"),
+        "roles": _get_file_path("roles"),
+        "state": _get_file_path("state"),
+        "seen": _get_file_path("seen"),
+        "muted": _get_file_path("muted"),
+        "stats": _get_file_path("stats"),
+        "keywords": _get_file_path("keywords"),
     }
     for key, fpath in files_to_backup.items():
         if os.path.exists(fpath):
@@ -505,16 +495,17 @@ def generate_full_backup(bot_type):
             backup_data[key] = None
     return backup_data
 
-def restore_full_backup(bot_type, backup_data):
+def restore_full_backup(backup_data):
     files_to_backup = {
-        "subscribers": _get_file_path(bot_type, "subscribers"),
-        "pending": _get_file_path(bot_type, "pending"),
-        "blocked": _get_file_path(bot_type, "blocked"),
-        "roles": _get_file_path(bot_type, "roles"),
-        "state": _get_file_path(bot_type, "state"),
-        "seen": _get_file_path(bot_type, "seen"),
-        "muted": _get_file_path(bot_type, "muted"),
-        "stats": _get_file_path(bot_type, "stats"),
+        "subscribers": _get_file_path("subscribers"),
+        "pending": _get_file_path("pending"),
+        "blocked": _get_file_path("blocked"),
+        "roles": _get_file_path("roles"),
+        "state": _get_file_path("state"),
+        "seen": _get_file_path("seen"),
+        "muted": _get_file_path("muted"),
+        "stats": _get_file_path("stats"),
+        "keywords": _get_file_path("keywords"),
     }
     for key, fpath in files_to_backup.items():
         if key in backup_data and backup_data[key] is not None:
@@ -524,71 +515,55 @@ def restore_full_backup(bot_type, backup_data):
                     json.dump(backup_data[key], f, indent=4)
                 os.replace(tmp, fpath)
             except Exception as e:
-                logger.error(f"Failed to restore {key} for {bot_type}: {e}")
+                logger.error(f"Failed to restore {key} for Khamsat: {e}")
 
 def generate_system_backup():
-    """Generate a single unified backup for both Mostaql and Khamsat data."""
+    """Generate a single unified backup for Khamsat data."""
     return {
-        "mostaql": generate_full_backup("mostaql"),
-        "khamsat": generate_full_backup("khamsat"),
+        "khamsat": generate_full_backup(),
         "timestamp": time.time()
     }
 
 def restore_system_backup(backup_data):
-    """Restore a single unified backup containing both Mostaql and Khamsat data."""
-    if "mostaql" in backup_data and backup_data["mostaql"] is not None:
-        restore_full_backup("mostaql", backup_data["mostaql"])
+    """Restore a backup containing Khamsat data."""
     if "khamsat" in backup_data and backup_data["khamsat"] is not None:
-        restore_full_backup("khamsat", backup_data["khamsat"])
+        restore_full_backup(backup_data["khamsat"])
+    else:
+        # Fallback if restore data is directly the inner backup dictionary
+        restore_full_backup(backup_data)
 
-def download_telegraph_db(bot_type):
-    token = TELEGRAPH_TOKEN_MOSTAQL if bot_type == "mostaql" else TELEGRAPH_TOKEN_KHAMSAT
-    path = TELEGRAPH_PATH_MOSTAQL if bot_type == "mostaql" else TELEGRAPH_PATH_KHAMSAT
+def download_telegraph_db():
     try:
-        r = requests.get(f'https://api.telegra.ph/getPage/{path}?return_content=true').json()
+        r = requests.get(f'https://api.telegra.ph/getPage/{TELEGRAPH_PATH_KHAMSAT}?return_content=true').json()
         if not r.get("ok"):
             return
         content = r['result']['content'][0]['children'][0]
         if content and content.startswith("{"):
             backup_data = json.loads(content)
-            restore_full_backup(bot_type, backup_data)
-            logger.info(f"Successfully restored {bot_type} state from Telegraph DB cloud!")
+            restore_full_backup(backup_data)
+            logger.info("Successfully restored Khamsat state from Telegraph DB cloud!")
     except Exception as e:
-        logger.error(f"Failed to download Telegraph DB for {bot_type}: {e}")
+        logger.error(f"Failed to download Telegraph DB: {e}")
 
-def telegraph_sync_thread(bot_type):
-    global last_uploaded_db_hash_mostaql, last_uploaded_db_hash_khamsat
-    
-    token = TELEGRAPH_TOKEN_MOSTAQL if bot_type == "mostaql" else TELEGRAPH_TOKEN_KHAMSAT
-    path = TELEGRAPH_PATH_MOSTAQL if bot_type == "mostaql" else TELEGRAPH_PATH_KHAMSAT
+def telegraph_sync_thread():
+    global last_uploaded_db_hash_khamsat
     
     while True:
         try:
-            backup_data = generate_full_backup(bot_type)
+            backup_data = generate_full_backup()
             db_str = json.dumps(backup_data)
             db_hash = hash(db_str)
             
-            is_new = False
-            if bot_type == "mostaql":
-                if db_hash != last_uploaded_db_hash_mostaql:
-                    is_new = True
-            else:
-                if db_hash != last_uploaded_db_hash_khamsat:
-                    is_new = True
-                    
-            if is_new:
+            if db_hash != last_uploaded_db_hash_khamsat:
                 content = [{"tag":"p", "children":[db_str]}]
-                r = requests.post(f'https://api.telegra.ph/editPage/{path}', json={
-                    'access_token': token,
-                    'title': f'DB_{bot_type}',
+                r = requests.post(f'https://api.telegra.ph/editPage/{TELEGRAPH_PATH_KHAMSAT}', json={
+                    'access_token': TELEGRAPH_TOKEN_KHAMSAT,
+                    'title': 'DB_khamsat',
                     'content': json.dumps(content)
                 }).json()
                 if r.get("ok"):
-                    if bot_type == "mostaql":
-                        last_uploaded_db_hash_mostaql = db_hash
-                    else:
-                        last_uploaded_db_hash_khamsat = db_hash
-                    logger.info(f"Successfully synced {bot_type} state to Telegraph DB!")
+                    last_uploaded_db_hash_khamsat = db_hash
+                    logger.info("Successfully synced Khamsat state to Telegraph DB!")
         except Exception:
             pass
         time.sleep(120)
@@ -596,125 +571,6 @@ def telegraph_sync_thread(bot_type):
 # ==============================================================================
 # CORE SCRAPING ENGINES
 # ==============================================================================
-def fetch_mostaql_projects(max_pages=5, max_attempts=12):
-    """Fetch up to max_pages of Mostaql projects, with short-lived cache."""
-    global scraper, _mostaql_project_cache
-    now = time.time()
-    if _mostaql_project_cache["data"] and (now - _mostaql_project_cache["ts"]) < MOSTAQL_CACHE_TTL:
-        return _mostaql_project_cache["data"], "cache", None
-
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-    all_proxies = list(premium_proxies) + list(free_proxies)
-    random.shuffle(all_proxies)
-
-    proxy_idx = 0
-    def get_next_proxy():
-        nonlocal proxy_idx
-        while proxy_idx < len(all_proxies) and proxy_idx < max_attempts:
-            scheme, addr = all_proxies[proxy_idx]
-            proxy_idx += 1
-            if PROXY_USER and PROXY_PASS and (scheme, addr) in premium_proxies:
-                pu = f"{scheme}://{PROXY_USER}:{PROXY_PASS}@{addr}"
-                pk = "premium"
-            else:
-                pu = f"{scheme}://{addr}"
-                pk = "free"
-            return {"http": pu, "https": pu}, pk, addr
-        return None, "direct", None
-
-    chosen_proxies, proxy_kind, p_addr = get_next_proxy()
-    all_items = []
-    seen_in_fetch = set()
-
-    url_mostaql = "https://mostaql.com/projects"
-    for page_num in range(1, max_pages + 1):
-        if len(all_items) >= 200:
-            break
-        page_url = f"{url_mostaql}?page={page_num}" if page_num > 1 else url_mostaql
-        
-        items = None
-        while items is None:
-            if chosen_proxies is None:
-                scraper = _new_scraper()
-                items = _fetch_mostaql_page(page_url, headers)
-                if items is None:
-                    break
-            else:
-                items = _fetch_mostaql_page(page_url, headers, chosen_proxies, proxy_kind, p_addr)
-                if items is None:
-                    chosen_proxies, proxy_kind, p_addr = get_next_proxy()
-                    if chosen_proxies is None:
-                        break
-                        
-        if not items:
-            break
-            
-        for item in items:
-            if item["id"] not in seen_in_fetch:
-                seen_in_fetch.add(item["id"])
-                all_items.append(item)
-                
-        time.sleep(0.5)
-
-    all_items = all_items[:200]
-    if all_items:
-        logger.info(f"Fetched {len(all_items)} Mostaql projects via {proxy_kind} ({p_addr})")
-        _mostaql_project_cache["data"] = all_items
-        _mostaql_project_cache["ts"] = time.time()
-    return all_items, proxy_kind, p_addr
-
-def _fetch_mostaql_page(page_url, headers, proxies=None, proxy_kind="direct", p_addr=None):
-    global scraper, backoff_until_mostaql
-    try:
-        resp = scraper.get(page_url, headers=headers, proxies=proxies or {}, timeout=10)
-        if resp.status_code == 200:
-            return extract_mostaql_projects(resp.text)
-        elif resp.status_code in (429, 403):
-            logger.error(f"Mostaql returned {resp.status_code}. Backing off for 5 minutes.")
-            backoff_until_mostaql = time.time() + 300
-            _notify_admins("mostaql", f"⚠️ تحذير: موقع مستقل قام بحظر الطلبات مؤقتاً (Error {resp.status_code}). تم إيقاف الفحص لمدة 5 دقائق.")
-    except Exception as e:
-        logger.warning(f"Mostaql Fetch error ({proxy_kind} {p_addr}): {e}")
-    return None
-
-def extract_mostaql_projects(html_text):
-    if not html_text or not isinstance(html_text, str):
-        return []
-    soup = BeautifulSoup(html_text, "html.parser")
-    project_elements = soup.select("a[href*='/project/']")
-    projects = []
-
-    for el in project_elements:
-        full_link = el.get("href")
-        if not full_link:
-            continue
-
-        if full_link.startswith("/"):
-            full_link = f"https://mostaql.com{full_link}"
-
-        if "/project/" not in full_link:
-            continue
-
-        try:
-            project_id = full_link.split('/project/')[-1].split('-')[0]
-        except (IndexError, AttributeError):
-            continue
-
-        if not project_id.isdigit():
-            continue
-
-        title = el.get_text(strip=True)
-        if not title:
-            continue
-
-        projects.append({
-            "id": project_id,
-            "title": title,
-            "link": full_link,
-        })
-
-    return projects
-
 def fetch_khamsat_projects(max_pages=8, max_attempts=12):
     """Fetch up to max_pages of Khamsat requests, with short-lived cache."""
     global scraper, _khamsat_project_cache
@@ -791,7 +647,7 @@ def _fetch_khamsat_page(page_url, headers, proxies=None, proxy_kind="direct", p_
         elif resp.status_code in (429, 403):
             logger.error(f"Khamsat returned {resp.status_code}. Backing off for 5 minutes.")
             backoff_until_khamsat = time.time() + 300
-            _notify_admins("khamsat", f"⚠️ تحذير: موقع خمسات قام بحظر الطلبات مؤقتاً (Error {resp.status_code}). تم إيقاف الفحص لمدة 5 دقائق.")
+            _notify_admins(f"⚠️ تحذير: موقع خمسات قام بحظر الطلبات مؤقتاً (Error {resp.status_code}). تم إيقاف الفحص لمدة 5 دقائق.")
     except Exception as e:
         logger.warning(f"Khamsat Fetch error ({proxy_kind} {p_addr}): {e}")
     return None
@@ -837,61 +693,7 @@ def extract_khamsat_projects(html_text):
 # ==============================================================================
 # MONITORING ENGINE & REAL-TIME EMITTERS
 # ==============================================================================
-seen_ids = set()
 max_seen_id = 0
-
-def check_mostaql():
-    global seen_ids, backoff_until_mostaql, deep_scan_counter_mostaql
-    
-    if time.time() < backoff_until_mostaql:
-        return
-
-    deep_scan_counter_mostaql += 1
-    pages_to_fetch = 5 if deep_scan_counter_mostaql % 20 == 0 else 1
-    if deep_scan_counter_mostaql % 20 == 0:
-        global _mostaql_project_cache
-        _mostaql_project_cache["ts"] = 0
-
-    projects, proxy_type, p_addr = fetch_mostaql_projects(max_pages=pages_to_fetch)
-    if not projects:
-        return
-
-    new_projects = []
-    with seen_ids_lock:
-        for p in projects:
-            p_id = p["id"]
-            if p_id not in seen_ids:
-                seen_ids.add(p_id)
-                new_projects.append(p)
-        
-        if new_projects:
-            try:
-                seen_file = _get_file_path("mostaql", "seen")
-                tmp_path = seen_file + ".tmp"
-                with open(tmp_path, "w") as f:
-                    json.dump(list(seen_ids), f)
-                os.replace(tmp_path, seen_file)
-            except Exception as e:
-                logger.error(f"Failed to save Mostaql seen IDs: {e}")
-
-    if new_projects:
-        subs = _load_subscribers("mostaql")
-        muted = _load_muted_users("mostaql")
-        targets = (subs | _get_all_admins("mostaql")) - muted
-        
-        for p in reversed(new_projects):
-            msg_text = f"🚀 مشروع جديد على مستقل:\n\n📝 {p['title']}"
-            reply_markup = {
-                "inline_keyboard": [
-                    [{"text": "عرض المشروع ↗️", "url": p['link']}]
-                ]
-            }
-            sent_count = 0
-            for cid in targets:
-                success, _ = _send_one("mostaql", cid, msg_text, reply_markup=reply_markup)
-                if success:
-                    sent_count += 1
-            _increment_stats("mostaql", sent_count)
 
 def check_khamsat():
     global max_seen_id, backoff_until_khamsat, deep_scan_counter_khamsat
@@ -924,7 +726,7 @@ def check_khamsat():
         
         if max_seen_id > current_max:
             try:
-                seen_file = _get_file_path("khamsat", "seen")
+                seen_file = _get_file_path("seen")
                 tmp_path = seen_file + ".tmp"
                 with open(tmp_path, "w") as f:
                     json.dump(max_seen_id, f)
@@ -933,9 +735,10 @@ def check_khamsat():
                 logger.error(f"Failed to save Khamsat max seen ID: {e}")
 
     if new_projects:
-        subs = _load_subscribers("khamsat")
-        muted = _load_muted_users("khamsat")
-        targets = (subs | _get_all_admins("khamsat")) - muted
+        subs = _load_subscribers()
+        muted = _load_muted_users()
+        targets = (subs | _get_all_admins()) - muted
+        keywords_map = _load_keywords()
         
         new_projects.sort(key=lambda x: int(x["id"]))
         
@@ -946,26 +749,24 @@ def check_khamsat():
                     [{"text": "عرض الطلب ↗️", "url": p['link']}]
                 ]
             }
+            title_lower = p['title'].lower()
             sent_count = 0
             for cid in targets:
-                success, _ = _send_one("khamsat", cid, msg_text, reply_markup=reply_markup)
+                cid_str = str(cid)
+                user_kws = keywords_map.get(cid_str, [])
+                if user_kws:
+                    matched = False
+                    for kw in user_kws:
+                        if kw in title_lower:
+                            matched = True
+                            break
+                    if not matched:
+                        continue
+                
+                success, _ = _send_one(cid, msg_text, reply_markup=reply_markup)
                 if success:
                     sent_count += 1
-            _increment_stats("khamsat", sent_count)
-
-def seed_seen_projects(projects):
-    global seen_ids
-    with seen_ids_lock:
-        for p in projects:
-            seen_ids.add(p["id"])
-        try:
-            seen_file = _get_file_path("mostaql", "seen")
-            tmp_path = seen_file + ".tmp"
-            with open(tmp_path, "w") as f:
-                json.dump(list(seen_ids), f)
-            os.replace(tmp_path, seen_file)
-        except Exception as e:
-            logger.error(f"Failed to seed Mostaql seen projects: {e}")
+            _increment_stats(sent_count)
 
 def seed_max_id(projects):
     global max_seen_id
@@ -979,7 +780,7 @@ def seed_max_id(projects):
         with max_seen_id_lock:
             max_seen_id = max(ids)
             try:
-                seen_file = _get_file_path("khamsat", "seen")
+                seen_file = _get_file_path("seen")
                 tmp_path = seen_file + ".tmp"
                 with open(tmp_path, "w") as f:
                     json.dump(max_seen_id, f)
@@ -987,28 +788,112 @@ def seed_max_id(projects):
             except Exception as e:
                 logger.error(f"Failed to seed Khamsat max seen ID: {e}")
 
-def send_startup_snapshot(bot_type, projects):
-    admins = _get_all_admins(bot_type)
+def send_startup_snapshot(projects):
+    admins = _get_all_admins()
     if not admins:
         return
     
-    site_name = "مستقل" if bot_type == "mostaql" else "خمسات"
-    lines = [f"📸 لقطة تشغيلية لأحدث طلبات {site_name} المتوفرة حالياً:\n"]
+    lines = [f"📸 لقطة تشغيلية لأحدث طلبات خمسات المتوفرة حالياً:\n"]
     for i, p in enumerate(projects[:5], 1):
         lines.append(f"{i}. {p['title']}\n🔗 {p['link']}\n")
     
     msg_text = "\n".join(lines)
     for cid in admins:
-        _send_one(bot_type, cid, msg_text)
+        _send_one(cid, msg_text)
 
 # ==============================================================================
 # TELEGRAM BOT CONTROLLERS (ADMIN INTERFACES)
 # ==============================================================================
-def _send_admin_menu(bot_type, chat_id):
-    token = MOSTAQL_BOT_TOKEN if bot_type == "mostaql" else KHAMSAT_BOT_TOKEN
-    base_url = f"https://api.telegram.org/bot{token}"
+def generate_visual_dashboard():
+    """Generate a premium-designed PNG infographic dashboard of the bot's stats."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')  # Use non-interactive backend
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        subs = _load_subscribers()
+        pending = _load_pending()
+        blocked = _load_blocked()
+        muted = _load_muted_users()
+        stats = _get_stats()
+        total_sent = stats.get('total_sent', 0)
+        
+        uptime_sec = int(time.time() - bot_start_time)
+        h, m = divmod(uptime_sec // 60, 60)
+        uptime_str = f"{h}h {m}m"
+        
+        fig = plt.figure(figsize=(10, 6), facecolor='#121214')
+        fig.text(0.05, 0.90, "📊 Khamsat Scraper Bot Dashboard", fontsize=18, fontweight='bold', color='#FFFFFF')
+        fig.text(0.05, 0.84, f"⏱ Uptime: {uptime_str}  |  📨 Total Sent: {total_sent}", fontsize=11, color='#A0A0A5')
+        
+        ax1 = fig.add_axes([0.08, 0.15, 0.42, 0.58], facecolor='#1E1E22')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        ax1.spines['left'].set_color('#3E3E42')
+        ax1.spines['bottom'].set_color('#3E3E42')
+        ax1.tick_params(colors='#A0A0A5')
+        
+        labels = ['Active\nSubs', 'Pending\nQueue', 'Muted\nUsers', 'Blocked\nUsers']
+        values = [len(subs), len(pending), len(muted), len(blocked)]
+        colors = ['#00E676', '#FFD600', '#29B6F6', '#FF1744']
+        
+        bars = ax1.barh(labels, values, color=colors, height=0.55, edgecolor='none')
+        ax1.set_xlabel('Count', color='#A0A0A5', fontsize=10)
+        ax1.set_title('User Database Metrics', color='#FFFFFF', fontsize=12, fontweight='bold', pad=15)
+        
+        for bar in bars:
+            width = bar.get_width()
+            ax1.text(width + 0.3, bar.get_y() + bar.get_height()/2, f"{int(width)}", 
+                     va='center', ha='left', color='#FFFFFF', fontweight='bold', fontsize=10)
+                     
+        ax2 = fig.add_axes([0.58, 0.15, 0.35, 0.58], facecolor='#1E1E22')
+        ax2.axis('off')
+        
+        rect = plt.Rectangle((0, 0), 1, 1, fill=True, color='#1E1E22', transform=ax2.transAxes, zorder=-1)
+        ax2.add_patch(rect)
+        
+        ax2.text(0.1, 0.85, "⚙ SYSTEM STATUS", fontsize=11, fontweight='bold', color='#FF4B4B')
+        ax2.text(0.1, 0.70, "• Site: Khamsat Community", fontsize=10, color='#FFFFFF')
+        ax2.text(0.1, 0.58, f"• Active Proxy Pool: {len(premium_proxies) + len(free_proxies)} IPs", fontsize=10, color='#FFFFFF')
+        ax2.text(0.1, 0.46, f"• Limit: {len(subs)} / {MAX_SUBSCRIBERS} Subs", fontsize=10, color='#FFFFFF')
+        
+        status_indicator = "HEALTHY" if backoff_until_khamsat < time.time() else "BACKING OFF"
+        indicator_color = "#00E676" if status_indicator == "HEALTHY" else "#FF1744"
+        ax2.text(0.1, 0.30, f"• Scraper Status: {status_indicator}", fontsize=10, color='#FFFFFF')
+        ax2.plot(0.85, 0.85, marker='o', markersize=12, color=indicator_color)
+        
+        fig.text(0.05, 0.05, "Generated dynamically by Advanced Agentic Bot Engine", fontsize=8, color='#505055', fontstyle='italic')
+        
+        import io
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=120, bbox_inches='tight', facecolor='#121214')
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+    except Exception as e:
+        logger.error(f"Error generating visual dashboard: {e}")
+        return None
+
+def _send_photo(chat_id, photo_buf, caption=""):
+    """Send generated PNG chart to user."""
+    if not KHAMSAT_BOT_TOKEN:
+        return False
+    tele_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendPhoto"
+    try:
+        photo_buf.seek(0)
+        files = {"photo": ("dashboard.png", photo_buf, "image/png")}
+        r = requests.post(tele_url, data={"chat_id": chat_id, "caption": caption}, files=files, timeout=20)
+        return r.status_code == 200
+    except Exception as e:
+        logger.error(f"Failed to send photo: {e}")
+        return False
+
+def _send_admin_menu(chat_id):
+    if not KHAMSAT_BOT_TOKEN:
+        return
+    base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
     
-    site_label = "مستقل" if bot_type == "mostaql" else "خمسات"
     keyboard = {
         "inline_keyboard": [
             [
@@ -1016,19 +901,21 @@ def _send_admin_menu(bot_type, chat_id):
                 {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}
             ],
             [
+                {"text": "📊 التقارير البصرية", "callback_data": "cmd:view_visual"},
                 {"text": "🗑️ مسح آخر بث", "callback_data": "cmd:delete_broadcast"}
             ]
         ]
     }
     requests.post(f"{base_url}/sendMessage", json={
         "chat_id": chat_id,
-        "text": f"👑 لوحة تحكم أدمن بوت {site_label}:",
+        "text": f"👑 لوحة تحكم أدمن بوت خمسات:",
         "reply_markup": keyboard
     })
 
-def handle_callback_query(bot_type, callback):
-    token = MOSTAQL_BOT_TOKEN if bot_type == "mostaql" else KHAMSAT_BOT_TOKEN
-    base_url = f"https://api.telegram.org/bot{token}"
+def handle_callback_query(callback):
+    if not KHAMSAT_BOT_TOKEN:
+        return
+    base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
     
     cb_id = callback["id"]
     from_user = callback["from"]
@@ -1036,8 +923,8 @@ def handle_callback_query(bot_type, callback):
     data = callback.get("data", "")
     
     role = 1
-    if is_owner(bot_type, chat_id): role = 3
-    elif is_admin(bot_type, chat_id): role = 2
+    if is_owner(chat_id): role = 3
+    elif is_admin(chat_id): role = 2
     
     if data.startswith("cmd:"):
         cmd = data.split("cmd:", 1)[1]
@@ -1047,7 +934,7 @@ def handle_callback_query(bot_type, callback):
             return
             
         if cmd == "delete_broadcast":
-            broadcast_msgs = _load_broadcast_msgs(bot_type)
+            broadcast_msgs = _load_broadcast_msgs()
             if not broadcast_msgs:
                 requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "⚠️ لا توجد رسالة بث مسجلة للمسح.", "show_alert": True})
                 return
@@ -1059,11 +946,11 @@ def handle_callback_query(bot_type, callback):
                     deleted += 1
                 except Exception:
                     pass
-            _save_broadcast_msgs(bot_type, {})
+            _save_broadcast_msgs({})
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": f"✅ تم حذف البث لـ {deleted} مستخدم.", "show_alert": True})
             
         elif cmd == "view_pending":
-            pending = _load_pending(bot_type)
+            pending = _load_pending()
             if not pending:
                 requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "✅ لا توجد طلبات معلقة حالياً.", "show_alert": True})
             else:
@@ -1074,47 +961,56 @@ def handle_callback_query(bot_type, callback):
                 requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
                 
         elif cmd == "view_stats":
-            subs = _load_subscribers(bot_type)
-            pending = _load_pending(bot_type)
-            blocked = _load_blocked(bot_type)
-            stats = _get_stats(bot_type)
+            subs = _load_subscribers()
+            pending = _load_pending()
+            blocked = _load_blocked()
+            stats = _get_stats()
             uptime_sec = int(time.time() - bot_start_time)
             h, m = divmod(uptime_sec // 60, 60)
-            muted_count = len(_load_muted_users(bot_type))
+            muted_count = len(_load_muted_users())
             
-            if bot_type == "mostaql":
-                id_label = f"عدد IDs المسجلة: {len(seen_ids)}"
-            else:
-                id_label = f"أعلى ID طلب شوفناه: {max_seen_id}"
+            id_label = f"أعلى ID طلب شوفناه: {max_seen_id}"
                 
             status_msg = (
-                f"📊 حالة بوت { 'مستقل' if bot_type == 'mostaql' else 'خمسات' }:\n"
+                f"📊 حالة بوت خمسات:\n"
                 f"⏱️ وقت التشغيل: {h}ساعة {m}دقيقة\n"
                 f"👥 المشتركين: {len(subs)} / {MAX_SUBSCRIBERS}\n"
                 f"🔕 كتموا إشعاراتهم: {muted_count}\n"
                 f"⏳ طلبات معلقة: {len(pending)}\n"
                 f"🚫 محظورين: {len(blocked)}\n"
-                f"👑 أدمنز: {len(_get_all_admins(bot_type))}\n"
+                f"👑 أدمنز: {len(_get_all_admins())}\n"
                 f"🔢 {id_label}\n"
                 f"📨 إجمالي رسائل مرسلة: {stats.get('total_sent', 0)}"
             )
             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": status_msg})
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+            
+            # Premium addition: automatically send visual status graph!
+            photo_buf = generate_visual_dashboard()
+            if photo_buf:
+                _send_photo(chat_id, photo_buf, caption="📊 الرسم البياني لحالة الأداء والنشاط")
+                
+        elif cmd == "view_visual":
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "⏳ جاري توليد التقرير البصري..."})
+            photo_buf = generate_visual_dashboard()
+            if photo_buf:
+                _send_photo(chat_id, photo_buf, caption="📊 لوحة التقارير البصرية الذكية لـ خمسات")
+            else:
+                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ فشل توليد التقرير البصري."})
 
 # ==============================================================================
 # PARAMETERIZED UPDATE HANDLER & COMMAND ROUTER
 # ==============================================================================
-def handle_updates_loop(bot_type, poll_interval=2):
-    token = MOSTAQL_BOT_TOKEN if bot_type == "mostaql" else KHAMSAT_BOT_TOKEN
-    if not token:
-        logger.warning(f"Polling disabled for {bot_type} (token is missing)")
+def handle_updates_loop(poll_interval=2):
+    if not KHAMSAT_BOT_TOKEN:
+        logger.warning("Polling disabled for Khamsat (token is missing)")
         return
 
-    base_url = f"https://api.telegram.org/bot{token}"
+    base_url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}"
     offset = 0
-    _load_roles(bot_type)
+    _load_roles()
 
-    logger.info(f"Started polling updates for {bot_type}...")
+    logger.info("Started polling updates for Khamsat...")
     while True:
         try:
             r = requests.get(f"{base_url}/getUpdates", params={"offset": offset, "timeout": 20}, timeout=25).json()
@@ -1126,7 +1022,7 @@ def handle_updates_loop(bot_type, poll_interval=2):
                 offset = update["update_id"] + 1
                 
                 if "callback_query" in update:
-                    handle_callback_query(bot_type, update["callback_query"])
+                    handle_callback_query(update["callback_query"])
                     continue
 
                 msg = update.get("message", {})
@@ -1142,9 +1038,9 @@ def handle_updates_loop(bot_type, poll_interval=2):
                 cmd = text.split()[0].split("@")[0].lower() if text else ""
 
                 role = 1
-                if is_owner(bot_type, chat_id):
+                if is_owner(chat_id):
                     role = 3
-                elif is_admin(bot_type, chat_id):
+                elif is_admin(chat_id):
                     role = 2
 
                 cmd_roles = {
@@ -1163,6 +1059,8 @@ def handle_updates_loop(bot_type, poll_interval=2):
                     "/reject":    2,
                     "/pending":   2,
                     "/status":    2,
+                    "/dashboard": 2,
+                    "/vstatus":   2,
 
                     "/start":       1,
                     "/subscribe":   1,
@@ -1173,6 +1071,9 @@ def handle_updates_loop(bot_type, poll_interval=2):
                     "/resume":      1,
                     "/ping":        1,
                     "/help":        1,
+                    "/filter":       1,
+                    "/myfilters":    1,
+                    "/filter_clear": 1,
                 }
 
                 if cmd in cmd_roles:
@@ -1182,27 +1083,27 @@ def handle_updates_loop(bot_type, poll_interval=2):
                 else:
                     continue
 
-                if role == 1 and _is_rate_limited(bot_type, chat_id):
+                if role == 1 and _is_rate_limited(chat_id):
                     continue
 
                 if cmd in ("/start", "/subscribe"):
                     with subscribers_lock:
-                        blocked = _load_blocked(bot_type)
+                        blocked = _load_blocked()
                     if chat_id in blocked:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🚫 تم حظرك من استخدام هذا البوت."})
                         continue
 
-                    if add_subscriber(bot_type, chat_id):
+                    if add_subscriber(chat_id):
                         welcome_msg = "لا تنسي الدعاء لنا و لامواتنا و اموات المسلمين\nوصلي علي النبي يا جدع"
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": welcome_msg})
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ عذراً، لا يمكن الاشتراك الآن (ربما وصل البوت للحد الأقصى)."})
 
                     if role >= 2:
-                        _send_admin_menu(bot_type, chat_id)
+                        _send_admin_menu(chat_id)
 
                 elif cmd == "/menu":
-                    _send_admin_menu(bot_type, chat_id)
+                    _send_admin_menu(chat_id)
 
                 elif cmd == "/approve":
                     parts = text.split()
@@ -1210,11 +1111,10 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         target_id = parts[1].strip()
                         try:
                             target_id = int(target_id)
-                            if add_subscriber(bot_type, target_id):
+                            if add_subscriber(target_id):
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم قبول المستخدم {target_id}"})
-                                site_label = "مستقل" if bot_type == "mostaql" else "خمسات"
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": target_id, "text": (
-                                    f"🎉 مرحباً! تم قبول اشتراكك في بوت {site_label}.\n\n"
+                                    f"🎉 مرحباً! تم قبول اشتراكك في بوت خمسات.\n\n"
                                     "ستصلك إشعارات الطلبات الجديدة فور نشرها.\n\n"
                                     "💡 أوامر مفيدة:\n"
                                     "/mymute - إيقاف الإشعارات مؤقتاً\n"
@@ -1234,7 +1134,7 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         target_id = parts[1].strip()
                         try:
                             target_id = int(target_id)
-                            reject_subscriber(bot_type, target_id)
+                            reject_subscriber(target_id)
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"❌ تم رفض المستخدم {target_id}"})
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": target_id, "text": "❌ عذراً، تم رفض طلب اشتراكك."})
                         except ValueError:
@@ -1244,11 +1144,11 @@ def handle_updates_loop(bot_type, poll_interval=2):
 
                 elif cmd == "/ids":
                     with subscribers_lock:
-                        subs = _load_subscribers(bot_type)
+                        subs = _load_subscribers()
                     if subs:
                         lines = ["👥 المشتركين المعتمدين:\n"]
                         for i, sid in enumerate(sorted(subs), 1):
-                            marker = "👑" if sid in _get_all_admins(bot_type) else "👤"
+                            marker = "👑" if sid in _get_all_admins() else "👤"
                             lines.append(f"{i}. {marker} {sid}  →  /block {sid}")
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "\n".join(lines)})
                     else:
@@ -1259,13 +1159,13 @@ def handle_updates_loop(bot_type, poll_interval=2):
                     if len(parts) >= 2:
                         try:
                             target_id = int(parts[1].strip())
-                            if target_id == get_owner_id(bot_type):
+                            if target_id == get_owner_id():
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "أنت المالك بالفعل!"})
                             else:
                                 with subscribers_lock:
-                                    admins = _load_admins(bot_type)
+                                    admins = _load_admins()
                                     admins.add(target_id)
-                                    _save_admins(bot_type, admins)
+                                    _save_admins(admins)
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم إضافة الأدمن {target_id}"})
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": target_id, "text": "👑 تم ترقيتك لتصبح أدمن في البوت!"})
                         except ValueError:
@@ -1279,9 +1179,9 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         try:
                             target_id = int(parts[1].strip())
                             with subscribers_lock:
-                                admins = _load_admins(bot_type)
+                                admins = _load_admins()
                                 admins.discard(target_id)
-                                _save_admins(bot_type, admins)
+                                _save_admins(admins)
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم إزالة الأدمن {target_id}"})
                         except ValueError:
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
@@ -1293,19 +1193,19 @@ def handle_updates_loop(bot_type, poll_interval=2):
                     if len(parts) >= 2:
                         try:
                             target_id = int(parts[1].strip())
-                            if target_id == get_owner_id(bot_type):
+                            if target_id == get_owner_id():
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لا يمكنك حظر نفسك!"})
                             else:
                                 with subscribers_lock:
-                                    blocked = _load_blocked(bot_type)
+                                    blocked = _load_blocked()
                                     blocked.add(target_id)
-                                    _save_blocked(bot_type, blocked)
-                                    subs = _load_subscribers(bot_type)
+                                    _save_blocked(blocked)
+                                    subs = _load_subscribers()
                                     subs.discard(target_id)
-                                    _save_subscribers(bot_type, subs)
-                                    pending = _load_pending(bot_type)
+                                    _save_subscribers(subs)
+                                    pending = _load_pending()
                                     pending.discard(target_id)
-                                    _save_pending(bot_type, pending)
+                                    _save_pending(pending)
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"🚫 تم حظر المستخدم {target_id}"})
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": target_id, "text": "🚫 تم حظرك من هذا البوت."})
                         except ValueError:
@@ -1319,9 +1219,9 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         try:
                             target_id = int(parts[1].strip())
                             with subscribers_lock:
-                                blocked = _load_blocked(bot_type)
+                                blocked = _load_blocked()
                                 blocked.discard(target_id)
-                                _save_blocked(bot_type, blocked)
+                                _save_blocked(blocked)
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم إلغاء حظر المستخدم {target_id}"})
                         except ValueError:
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
@@ -1332,13 +1232,13 @@ def handle_updates_loop(bot_type, poll_interval=2):
                     broadcast_msg = text[len("/broadcast"):].strip()
                     if broadcast_msg:
                         with subscribers_lock:
-                            subs = _load_subscribers(bot_type)
-                        all_targets = subs | _get_all_admins(bot_type)
+                            subs = _load_subscribers()
+                        all_targets = subs | _get_all_admins()
                         sent = 0
                         msg_map = {}
                         for target in all_targets:
                             try:
-                                r = requests.post(f"{base_url}/sendMessage", json={"chat_id": target, "text": f"📢 السلام عليكم و رحمة اللة و بركاتة:\n\n{broadcast_msg}"}, timeout=10)
+                                r = requests.post(f"{base_url}/sendMessage", json={"chat_id": target, "text": f"📢 السلام عليكم و رحمة الله و بركاته:\n\n{broadcast_msg}"}, timeout=10)
                                 if r.status_code == 200:
                                     sent += 1
                                     data = r.json()
@@ -1347,7 +1247,7 @@ def handle_updates_loop(bot_type, poll_interval=2):
                                 pass
                         
                         if msg_map:
-                            _save_broadcast_msgs(bot_type, msg_map)
+                            _save_broadcast_msgs(msg_map)
                             kb = {"inline_keyboard": [[{"text": "🗑️ مسح الرسالة للجميع", "callback_data": "cmd:delete_broadcast"}]]}
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم إرسال الرسالة لـ {sent}/{len(all_targets)} مستخدم.", "reply_markup": kb})
                         else:
@@ -1361,26 +1261,21 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         count = int(parts[1])
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ جاري جلب آخر {count} طلبات..."})
                         
-                        if bot_type == "mostaql":
-                            projects, _, _ = fetch_mostaql_projects()
-                            site_label = "مستقل"
-                        else:
-                            projects, _, _ = fetch_khamsat_projects()
-                            site_label = "خمسات"
+                        projects, _, _ = fetch_khamsat_projects()
                             
                         if not projects:
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ لم يتم العثور على طلبات حالياً."})
                         else:
                             to_send = projects[:count]
-                            msg_lines = [f"🚀 إليك آخر {len(to_send)} طلبات تم طرحها على {site_label}:\n"]
+                            msg_lines = [f"🚀 إليك آخر {len(to_send)} طلبات تم طرحها على خمسات:\n"]
                             for p in to_send:
                                 msg_lines.append(f"📝 {p['title']}\n🔗 {p['link']}\n")
                             
                             broadcast_msg = "\n".join(msg_lines)
                             
                             with subscribers_lock:
-                                subs = _load_subscribers(bot_type)
-                            all_targets = subs | _get_all_admins(bot_type)
+                                subs = _load_subscribers()
+                            all_targets = subs | _get_all_admins()
                             sent = 0
                             msg_map = {}
                             for target in all_targets:
@@ -1394,7 +1289,7 @@ def handle_updates_loop(bot_type, poll_interval=2):
                                     pass
                             
                             if msg_map:
-                                _save_broadcast_msgs(bot_type, msg_map)
+                                _save_broadcast_msgs(msg_map)
                                 kb = {"inline_keyboard": [[{"text": "🗑️ مسح للجميع", "callback_data": "cmd:delete_broadcast"}]]}
                                 requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"✅ تم إرسال الطلبات لـ {sent}/{len(all_targets)} مستخدم.", "reply_markup": kb})
                             else:
@@ -1403,27 +1298,27 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /send_last <رقم>\nمثال: /send_last 5"})
 
                 elif cmd == "/unsubscribe":
-                    remove_subscriber(bot_type, chat_id)
-                    mu = _load_muted_users(bot_type)
+                    remove_subscriber(chat_id)
+                    mu = _load_muted_users()
                     mu.discard(chat_id)
-                    _save_muted_users(bot_type, mu)
+                    _save_muted_users(mu)
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ تم إلغاء اشتراكك."})
 
                 elif cmd in ("/mymute", "/pause"):
                     with subscribers_lock:
-                        subs = _load_subscribers(bot_type)
-                    if chat_id in subs or is_admin(bot_type, chat_id):
-                        mu = _load_muted_users(bot_type)
+                        subs = _load_subscribers()
+                    if chat_id in subs or is_admin(chat_id):
+                        mu = _load_muted_users()
                         mu.add(chat_id)
-                        _save_muted_users(bot_type, mu)
+                        _save_muted_users(mu)
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔕 تم كتم الإشعارات لحسابك مؤقتاً.\nأرسل /myunmute لإعادة تفعيلها."})
                     else:
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ أنت لست مشتركاً."})
 
                 elif cmd in ("/myunmute", "/resume"):
-                    mu = _load_muted_users(bot_type)
+                    mu = _load_muted_users()
                     mu.discard(chat_id)
-                    _save_muted_users(bot_type, mu)
+                    _save_muted_users(mu)
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔔 تم إعادة تفعيل إشعاراتك!"})
 
                 elif cmd == "/backup":
@@ -1435,7 +1330,7 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         bio.name = "system_backup_data.json"
                         requests.post(
                             f"{base_url}/sendDocument",
-                            data={"chat_id": chat_id, "caption": "💾 نسخة احتياطية كاملة وشاملة (مستقل + خمسات) — استخدم /restore بالرد على هذا الملف لاستعادة كافة البيانات دفعة واحدة."},
+                            data={"chat_id": chat_id, "caption": "💾 نسخة احتياطية كاملة وشاملة لبوت خمسات — استخدم /restore بالرد على هذا الملف لاستعادة كافة البيانات دفعة واحدة."},
                             files={"document": ("system_backup_data.json", bio, "application/json")},
                             timeout=20
                         )
@@ -1454,23 +1349,19 @@ def handle_updates_loop(bot_type, poll_interval=2):
                             if not r_fp.get("ok"):
                                 raise Exception("getFile failed")
                             tg_path = r_fp["result"]["file_path"]
-                            r_dl = requests.get(f"https://api.telegram.org/file/bot{token}/{tg_path}", timeout=20)
+                            r_dl = requests.get(f"https://api.telegram.org/file/bot{KHAMSAT_BOT_TOKEN}/{tg_path}", timeout=20)
                             backup_data = json.loads(r_dl.content.decode("utf-8"))
                             
-                            # Smart restore: check if it's a unified backup or old format
-                            if "mostaql" in backup_data or "khamsat" in backup_data:
-                                restore_system_backup(backup_data)
-                            else:
-                                restore_full_backup(bot_type, backup_data)
+                            restore_system_backup(backup_data)
                                 
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ تم استعادة جميع البيانات بنجاح! 🎉"})
-                            logger.info(f"Full restore triggered by {chat_id} on {bot_type}")
+                            logger.info(f"Full restore triggered by {chat_id}")
                         except Exception as _re:
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"❌ فشل الاستعادة: {_re}"})
 
                 elif cmd == "/pending":
                     with subscribers_lock:
-                        pending = _load_pending(bot_type)
+                        pending = _load_pending()
                     if pending:
                         lines = ["⏳ طلبات الاشتراك المعلقة:\n"]
                         for pid in sorted(pending):
@@ -1480,10 +1371,9 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ لا توجد طلبات معلقة."})
 
                 elif cmd == "/help":
-                    site_label = "مستقل" if bot_type == "mostaql" else "خمسات"
                     if role >= 3:
                         help_text = (
-                            f"🤖 أوامر البوت — نظام الرولز ({site_label}):\n"
+                            f"🤖 أوامر البوت — نظام الرولز (خمسات):\n"
                             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             "👑 المالك (Owner) فقط:\n"
                             "  /menu — لوحة التحكم\n"
@@ -1500,11 +1390,15 @@ def handle_updates_loop(bot_type, poll_interval=2):
                             "  /approve <id> — قبول مشترك\n"
                             "  /reject <id> — رفض مشترك\n"
                             "  /pending — الطلبات المعلقة\n"
-                            "  /status — حالة البوت\n"
+                            "  /status — حالة البوت (نصي + رسم بياني)\n"
+                            "  /dashboard — لوحة التقارير البصرية 📊\n"
                             "  /restore — استعادة باك أب (رد على الملف)\n"
                             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             "👤 المشترك العادي:\n"
                             "  /start — طلب اشتراك\n"
+                            "  /filter <كلمات> — تفعيل فلتر الكلمات المفتاحية 🏷️\n"
+                            "  /myfilters — عرض كلماتك المفتاحية النشطة\n"
+                            "  /filter_clear — إلغاء الفلترة واستلام كل شيء\n"
                             "  /mymute — كتم إشعاراتك\n"
                             "  /myunmute — تفعيل إشعاراتك\n"
                             "  /unsubscribe — إلغاء الاشتراك\n"
@@ -1512,16 +1406,20 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         )
                     elif role >= 2:
                         help_text = (
-                            f"🤖 أوامر البوت — نظام الرولز ({site_label}):\n"
+                            f"🤖 أوامر البوت — نظام الرولز (خمسات):\n"
                             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             "⚙️ الأدمن (Admin):\n"
                             "  /approve <id> — قبول مشترك\n"
                             "  /reject <id> — رفض مشترك\n"
                             "  /pending — الطلبات المعلقة\n"
-                            "  /status — حالة البوت\n"
+                            "  /status — حالة البوت (نصي + رسم بياني)\n"
+                            "  /dashboard — لوحة التقارير البصرية 📊\n"
                             "  /restore — استعادة باك أب (رد على الملف)\n"
                             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             "👤 المشترك العادي:\n"
+                            "  /filter <كلمات> — تفعيل فلتر الكلمات المفتاحية 🏷️\n"
+                            "  /myfilters — عرض كلماتك المفتاحية النشطة\n"
+                            "  /filter_clear — إلغاء الفلترة واستلام كل شيء\n"
                             "  /mymute — كتم إشعاراتك\n"
                             "  /myunmute — تفعيل إشعاراتك\n"
                             "  /unsubscribe — إلغاء الاشتراك\n"
@@ -1529,10 +1427,13 @@ def handle_updates_loop(bot_type, poll_interval=2):
                         )
                     else:
                         help_text = (
-                            f"🤖 أوامر البوت ({site_label}):\n"
+                            f"🤖 أوامر البوت (خمسات):\n"
                             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
                             "👤 أوامر عامة:\n"
                             "  /start — طلب اشتراك\n"
+                            "  /filter <كلمات> — تفعيل فلتر الكلمات المفتاحية 🏷️\n"
+                            "  /myfilters — عرض كلماتك المفتاحية النشطة\n"
+                            "  /filter_clear — إلغاء الفلترة واستلام كل شيء\n"
                             "  /mymute — كتم إشعاراتك\n"
                             "  /myunmute — تفعيل إشعاراتك\n"
                             "  /unsubscribe — إلغاء الاشتراك\n"
@@ -1542,130 +1443,174 @@ def handle_updates_loop(bot_type, poll_interval=2):
 
                 elif cmd == "/status":
                     with subscribers_lock:
-                        subs = _load_subscribers(bot_type)
-                        pending = _load_pending(bot_type)
-                        blocked = _load_blocked(bot_type)
-                    stats = _get_stats(bot_type)
+                        subs = _load_subscribers()
+                        pending = _load_pending()
+                        blocked = _load_blocked()
+                    stats = _get_stats()
                     uptime_sec = int(time.time() - bot_start_time)
                     h, m = divmod(uptime_sec // 60, 60)
-                    muted_count = len(_load_muted_users(bot_type))
+                    muted_count = len(_load_muted_users())
                     
-                    if bot_type == "mostaql":
-                        id_label = f"عدد IDs المسجلة: {len(seen_ids)}"
-                    else:
-                        id_label = f"أعلى ID طلب شوفناه: {max_seen_id}"
+                    id_label = f"أعلى ID طلب شوفناه: {max_seen_id}"
                         
                     status_msg = (
-                        f"📊 حالة بوت { 'مستقل' if bot_type == 'mostaql' else 'خمسات' }:\n"
+                        f"📊 حالة بوت خمسات:\n"
                         f"⏱️ وقت التشغيل: {h}ساعة {m}دقيقة\n"
                         f"👥 المشتركين: {len(subs)} / {MAX_SUBSCRIBERS}\n"
                         f"🔕 كتموا إشعاراتهم: {muted_count}\n"
                         f"⏳ طلبات معلقة: {len(pending)}\n"
                         f"🚫 محظورين: {len(blocked)}\n"
-                        f"👑 أدمنز: {len(_get_all_admins(bot_type))}\n"
+                        f"👑 أدمنز: {len(_get_all_admins())}\n"
                         f"🔢 {id_label}\n"
                         f"📨 إجمالي رسائل مرسلة: {stats.get('total_sent', 0)}"
                     )
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": status_msg})
+                    
+                    # Premium addition: automatically send visual status graph!
+                    photo_buf = generate_visual_dashboard()
+                    if photo_buf:
+                        _send_photo(chat_id, photo_buf, caption="📊 الرسم البياني للأداء")
+
+                elif cmd in ("/dashboard", "/vstatus"):
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⏳ جاري توليد لوحة التقارير البصرية الذكية..."})
+                    photo_buf = generate_visual_dashboard()
+                    if photo_buf:
+                        _send_photo(chat_id, photo_buf, caption="📊 لوحة تقارير الأداء البصرية لبوت خمسات")
+                    else:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ فشل توليد التقرير البصري."})
+
+                elif cmd == "/filter":
+                    keywords_str = text[len("/filter"):].strip()
+                    if not keywords_str:
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": (
+                            "⚠️ يرجى إدخال الكلمات المفتاحية مفصولة بفواصل.\n"
+                            "مثال: `/filter تصميم, برمجة, ترجمة`"
+                        )})
+                    else:
+                        # Split by comma or space, strip whitespace, and lower-case
+                        kws = [k.strip().lower() for k in keywords_str.replace("،", ",").split(",") if k.strip()]
+                        if not kws:
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ يرجى كتابة كلمات صحيحة مفصولة بفواصل."})
+                        else:
+                            with subscribers_lock:
+                                kws_map = _load_keywords()
+                                kws_map[str(chat_id)] = kws
+                                _save_keywords(kws_map)
+                            
+                            formatted_kws = ", ".join(kws)
+                            success_msg = (
+                                f"✅ تم تفعيل الفلترة الذكية لحسابك بنجاح!\n\n"
+                                f"📋 الكلمات المفتاحية الحالية:\n"
+                                f"🏷️ *{formatted_kws}*\n\n"
+                                f"💡 ستصلك الآن فقط طلبات خمسات التي تحتوي على أي من هذه الكلمات في عنوانها.\n"
+                                f"لإلغاء الفلترة واستلام كل الطلبات، أرسل: `/filter_clear`"
+                            )
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": success_msg, "parse_mode": "Markdown"})
+
+                elif cmd == "/myfilters":
+                    kws_map = _load_keywords()
+                    kws = kws_map.get(str(chat_id), [])
+                    if not kws:
+                        msg = (
+                            "🔔 أنت تستقبل حالياً جميع طلبات خمسات دون فلترة.\n\n"
+                            "💡 لتفعيل الفلترة الذكية، أرسل الكلمات المفتاحية مفصولة بفواصل:\n"
+                            "مثال: `/filter تصميم, ترجمة, لوجو`"
+                        )
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
+                    else:
+                        formatted_kws = ", ".join(kws)
+                        msg = (
+                            f"📋 الكلمات المفتاحية النشطة لحسابك:\n"
+                            f"🏷️ *{formatted_kws}*\n\n"
+                            f"💡 لتحديثها، أرسل أمراً جديداً بالكلمات التي تريدها.\n"
+                            f"لإلغاء الفلترة بالكامل، أرسل: `/filter_clear`"
+                        )
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"})
+
+                elif cmd in ("/filter_clear", "/filter_off"):
+                    with subscribers_lock:
+                        kws_map = _load_keywords()
+                        if str(chat_id) in kws_map:
+                            del kws_map[str(chat_id)]
+                            _save_keywords(kws_map)
+                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔔 تم إلغاء الفلترة الذكية بنجاح. ستصلك الآن جميع طلبات خمسات دون استثناء."})
 
                 elif cmd == "/ping":
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "pong ✅"})
                     
         except Exception as e:
-            logger.debug(f"Updates loop error for {bot_type}: {str(e)}")
+            logger.debug(f"Updates loop error: {str(e)}")
             time.sleep(poll_interval)
 
 # ==============================================================================
 # PERIODIC TASKS LOOP (STATS & 3-MINUTE AUTO TELEGRAM BACKUPS)
 # ==============================================================================
-def _periodic_tasks_loop(bot_type):
-    """Send weekly statistics and daily backups to owner."""
+def _periodic_tasks_loop():
+    """Send weekly statistics and 3-minute automatic backups to owner."""
     time.sleep(10)
     last_stats_sent = time.time()
     last_backup_sent = time.time()
     
-    site_label = "مستقل" if bot_type == "mostaql" else "خمسات"
     while True:
-        time.sleep(30)  # Check every 30 seconds for hyper-responsiveness
+        time.sleep(30)  # Check every 30 seconds
         now = time.time()
         
         # 3-minute automatic backups (180 seconds)
         if now - last_backup_sent >= 180:
-            should_send = False
-            if bot_type == "mostaql":
-                should_send = True
-            elif bot_type == "khamsat" and not MOSTAQL_BOT_TOKEN:
-                should_send = True
+            try:
+                backup_data = generate_system_backup()
+                backup_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
+                import io
+                bio = io.BytesIO(backup_bytes)
+                bio.name = "system_backup_data.json"
                 
-            if should_send:
-                try:
-                    backup_data = generate_system_backup()
-                    backup_bytes = json.dumps(backup_data, ensure_ascii=False, indent=2).encode("utf-8")
-                    import io
-                    bio = io.BytesIO(backup_bytes)
-                    bio.name = "system_backup_data.json"
-                    
-                    token = MOSTAQL_BOT_TOKEN if bot_type == "mostaql" else KHAMSAT_BOT_TOKEN
-                    if token:
-                        requests.post(
-                            f"https://api.telegram.org/bot{token}/sendDocument",
-                            data={"chat_id": get_owner_id(bot_type), "caption": "📦 نسخة احتياطية تلقائية شاملة (مستقل + خمسات).\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
-                            files={"document": ("system_backup_data.json", bio, "application/json")},
-                            timeout=20
-                        )
-                    last_backup_sent = now
-                    logger.info(f"Unified 3-minute backup sent to owner via {bot_type} thread")
-                except Exception as e:
-                    logger.error(f"Unified 3-minute backup error: {e}")
+                if KHAMSAT_BOT_TOKEN:
+                    requests.post(
+                        f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendDocument",
+                        data={"chat_id": get_owner_id(), "caption": "📦 نسخة احتياطية تلقائية لبوت خمسات.\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
+                        files={"document": ("system_backup_data.json", bio, "application/json")},
+                        timeout=20
+                    )
+                last_backup_sent = now
+                logger.info("3-minute backup sent to owner via Khamsat")
+            except Exception as e:
+                logger.error(f"3-minute backup error: {e}")
 
         # Weekly statistics
         if now - last_stats_sent >= 7 * 24 * 3600:
             try:
-                subs = _load_subscribers(bot_type)
-                pending = _load_pending(bot_type)
-                blocked = _load_blocked(bot_type)
-                stats = _get_stats(bot_type)
+                subs = _load_subscribers()
+                pending = _load_pending()
+                blocked = _load_blocked()
+                stats = _get_stats()
                 uptime_sec = int(time.time() - bot_start_time)
                 h, m = divmod(uptime_sec // 60, 60)
-                muted_count = len(_load_muted_users(bot_type))
+                muted_count = len(_load_muted_users())
                 
                 stats_msg = (
-                    f"📊 إحصائيات الأسبوع لبوت {site_label}:\n"
+                    f"📊 إحصائيات الأسبوع لبوت خمسات:\n"
                     f"⏱️ وقت التشغيل: {h}ساعة {m}دقيقة\n"
                     f"👥 المشتركين: {len(subs)} / {MAX_SUBSCRIBERS}\n"
                     f"🔕 كتموا إشعاراتهم: {muted_count}\n"
                     f"⏳ طلبات معلقة: {len(pending)}\n"
                     f"🚫 محظورين: {len(blocked)}\n"
-                    f"👑 أدمنز: {len(_get_all_admins(bot_type))}\n"
+                    f"👑 أدمنز: {len(_get_all_admins())}\n"
                     f"📨 إجمالي رسائل مرسلة: {stats.get('total_sent', 0)}"
                 )
-                token = MOSTAQL_BOT_TOKEN if bot_type == "mostaql" else KHAMSAT_BOT_TOKEN
-                if token:
-                    requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id": get_owner_id(bot_type), "text": stats_msg}, timeout=10)
+                if KHAMSAT_BOT_TOKEN:
+                    requests.post(f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage", json={"chat_id": get_owner_id(), "text": stats_msg}, timeout=10)
                 last_stats_sent = now
-                logger.info(f"Weekly stats sent to owner for {bot_type}")
+                logger.info("Weekly stats sent to owner")
             except Exception as e:
-                logger.error(f"Weekly stats error for {bot_type}: {e}")
+                logger.error(f"Weekly stats error: {e}")
 
 # ==============================================================================
 # MAIN SYSTEM INITIALIZER
 # ==============================================================================
 def load_seen_data():
-    global seen_ids, max_seen_id
+    global max_seen_id
     
-    mostaql_seen_file = _get_file_path("mostaql", "seen")
-    if os.path.exists(mostaql_seen_file):
-        try:
-            with open(mostaql_seen_file, "r") as f:
-                seen_ids = set(json.load(f))
-            logger.info(f"Loaded {len(seen_ids)} previously seen Mostaql projects")
-        except Exception as e:
-            logger.error(f"Failed to load Mostaql seen file: {e}")
-            seen_ids = set()
-    else:
-        seen_ids = set()
-        
-    khamsat_seen_file = _get_file_path("khamsat", "seen")
+    khamsat_seen_file = _get_file_path("seen")
     if os.path.exists(khamsat_seen_file):
         try:
             with open(khamsat_seen_file, "r") as f:
@@ -1681,62 +1626,30 @@ if __name__ == "__main__":
     load_all_configs()
     
     # Download Telegraph backups dynamically
-    if MOSTAQL_BOT_TOKEN:
-        download_telegraph_db("mostaql")
     if KHAMSAT_BOT_TOKEN:
-        download_telegraph_db("khamsat")
+        download_telegraph_db()
         
     load_seen_data()
     load_proxies()
     
     logger.info("=" * 50)
-    logger.info("Unified Mostaql & Khamsat Scraper Bot System Started")
+    logger.info("Khamsat Scraper Bot System Started")
     logger.info("=" * 50)
 
-    # 1. Start threads for Mostaql Bot
-    if MOSTAQL_BOT_TOKEN:
-        threading.Thread(target=handle_updates_loop, args=("mostaql", 2), daemon=True).start()
-        threading.Thread(target=_periodic_tasks_loop, args=("mostaql",), daemon=True).start()
-        threading.Thread(target=telegraph_sync_thread, args=("mostaql",), daemon=True).start()
-        
-        startup_projects, startup_proxy_type, startup_proxy_addr = fetch_mostaql_projects()
-        if startup_projects:
-            if not seen_ids:
-                seed_seen_projects(startup_projects)
-            send_startup_snapshot("mostaql", startup_projects)
-            logger.info(f"Mostaql startup snapshot sent via {startup_proxy_type} proxy ({startup_proxy_addr})")
-        else:
-            logger.warning("No Mostaql startup projects were found")
-            
-    # 2. Start threads for Khamsat Bot
+    # Start threads for Khamsat Bot
     if KHAMSAT_BOT_TOKEN:
-        threading.Thread(target=handle_updates_loop, args=("khamsat", 2), daemon=True).start()
-        threading.Thread(target=_periodic_tasks_loop, args=("khamsat",), daemon=True).start()
-        threading.Thread(target=telegraph_sync_thread, args=("khamsat",), daemon=True).start()
+        threading.Thread(target=handle_updates_loop, daemon=True).start()
+        threading.Thread(target=_periodic_tasks_loop, daemon=True).start()
+        threading.Thread(target=telegraph_sync_thread, daemon=True).start()
         
         startup_reqs, startup_proxy_type, startup_proxy_addr = fetch_khamsat_projects()
         if startup_reqs:
             if max_seen_id == 0:
                 seed_max_id(startup_reqs)
-            send_startup_snapshot("khamsat", startup_reqs)
+            send_startup_snapshot(startup_reqs)
             logger.info(f"Khamsat startup snapshot sent via {startup_proxy_type} proxy ({startup_proxy_addr})")
         else:
             logger.warning("No Khamsat startup requests were found")
-
-    # 3. Concurrent Scraping Loops
-    def mostaql_scraping_loop():
-        if not MOSTAQL_BOT_TOKEN:
-            return
-        logger.info("Started Mostaql scraping loop...")
-        while True:
-            try:
-                check_mostaql()
-            except Exception as e:
-                logger.error(f"Mostaql scraping loop error: {e}")
-            
-            wait = CHECK_INTERVAL_MOSTAQL + random.randint(5, 15)
-            logger.info(f"Mostaql waiting {wait}s before next scan")
-            time.sleep(wait)
 
     def khamsat_scraping_loop():
         if not KHAMSAT_BOT_TOKEN:
@@ -1752,28 +1665,12 @@ if __name__ == "__main__":
             logger.info(f"Khamsat waiting {wait:.1f}s before next scan")
             time.sleep(wait)
 
-    if MOSTAQL_BOT_TOKEN:
-        threading.Thread(target=mostaql_scraping_loop, daemon=True).start()
     if KHAMSAT_BOT_TOKEN:
         threading.Thread(target=khamsat_scraping_loop, daemon=True).start()
         
     # Send startup notifications
-    if MOSTAQL_BOT_TOKEN:
-        _notify_admins("mostaql", "🚀 بدأت مراقبة مشاريع 'مستقل' الآن..")
-        owner_startup_msg = (
-            "🚀 تم تشغيل بوت مستقل بنجاح!\n\n"
-            "لو حسيت إن الداتا طارت بسبب ريستارت السيرفر، مفيش مشكلة.\n"
-            "اعمل Reply على آخر ملف نسخ احتياطي أرسلتهولك، واكتب أمر:\n"
-            "/restore\n\n"
-            "والداتا كلها هترجع في ثانية واحدة."
-        )
-        try:
-            requests.post(f"https://api.telegram.org/bot{MOSTAQL_BOT_TOKEN}/sendMessage", json={"chat_id": get_owner_id("mostaql"), "text": owner_startup_msg}, timeout=10)
-        except Exception:
-            pass
-
     if KHAMSAT_BOT_TOKEN:
-        _notify_admins("khamsat", "🚀 بدأت مراقبة طلبات 'خمسات' الآن..")
+        _notify_admins("🚀 بدأت مراقبة طلبات 'خمسات' الآن..")
         owner_startup_msg = (
             "🚀 تم تشغيل بوت خمسات بنجاح!\n\n"
             "لو حسيت إن الداتا طارت بسبب ريستارت السيرفر، مفيش مشكلة.\n"
@@ -1782,7 +1679,7 @@ if __name__ == "__main__":
             "والداتا كلها هترجع في ثانية واحدة."
         )
         try:
-            requests.post(f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage", json={"chat_id": get_owner_id("khamsat"), "text": owner_startup_msg}, timeout=10)
+            requests.post(f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage", json={"chat_id": get_owner_id(), "text": owner_startup_msg}, timeout=10)
         except Exception:
             pass
 
@@ -1792,5 +1689,5 @@ if __name__ == "__main__":
         try:
             time.sleep(1)
         except KeyboardInterrupt:
-            logger.info("Unified bot stopped by user.")
+            logger.info("Khamsat bot stopped by user.")
             break
