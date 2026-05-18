@@ -207,7 +207,7 @@ def _proxy_rank_key(item):
 def load_all_configs():
     """Dynamically load configs from environment or local .env file."""
     global KHAMSAT_BOT_TOKEN, PROXY_USER, PROXY_PASS, TELEGRAPH_TOKEN_KHAMSAT, TELEGRAPH_PATH_KHAMSAT, BACKUP_CHAT_ID
-    BACKUP_CHAT_ID = None
+    BACKUP_CHAT_ID = "-1003990598353"  # fallback: custom backup chat (overridden by env var if set)
     
     KHAMSAT_BOT_TOKEN = os.getenv("BOT_TOKEN")
     PROXY_USER = os.getenv("PROXY_USER", "")
