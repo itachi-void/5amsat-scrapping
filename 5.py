@@ -295,6 +295,9 @@ def _send_backup_menu(chat_id, callback=None):
     menu_text = (
         "💾 **إعدادات النسخ الاحتياطي التلقائي لبوت خمسات (Backup Settings):**\n\n"
         f"الحالة الحالية: {status_text}\n\n"
+        "ℹ️ **الفرق بين الباك أب التلقائي ومزامنة Telegraph:**\n"
+        "• 💾 **الباك أب التلقائي (هذا القسم):** يقوم بإنشاء ملف نسخة احتياطية (.json) وإرساله لك مباشرةً في شات التليجرام كل 3 دقائق. تكمن أهميته في إمكانية عمل رد (Reply) عليه وكتابة أمر `/restore` لاستعادة البيانات يدوياً في أي وقت.\n"
+        "• ☁️ **مزامنة Telegraph:** هي مزامنة سحابية صامتة تحدث كل دقيقتين، حيث يتم حفظ نسخة مشفرة من قاعدة البيانات على خوادم Telegraph سحابياً. فائدتها أنها تُمكّن البوت من استرجاع كافة البيانات تلقائياً دون تدخل منك عند إعادة تشغيل البوت أو نقله لسيرفر جديد.\n\n"
         "💡 يمكنك التحكم في تشغيل أو تجميد الباك أب التلقائي واختيار مدة التجميد المناسبة من الخيارات أدناه:"
     )
     
@@ -1219,6 +1222,9 @@ def _send_telegraph_menu(chat_id, callback=None):
     menu_text = (
         "☁️ **إعدادات النسخ الاحتياطي السحابي لبوت خمسات (Telegraph Backup Settings):**\n\n"
         f"الحالة الحالية: {status_text}\n\n"
+        "ℹ️ **الفرق بين مزامنة Telegraph والباك أب التلقائي:**\n"
+        "• ☁️ **مزامنة Telegraph (هذا القسم):** هي مزامنة سحابية صامتة تحدث كل دقيقتين، حيث يتم حفظ نسخة مشفرة من قاعدة البيانات على خوادم Telegraph سحابياً. فائدتها أنها تُمكّن البوت من استرجاع كافة البيانات تلقائياً دون تدخل منك عند إعادة تشغيل البوت أو نقله لسيرفر جديد.\n"
+        "• 💾 **الباك أب التلقائي:** يقوم بإنشاء ملف نسخة احتياطية (.json) وإرساله لك مباشرةً في شات التليجرام كل 3 دقائق. تكمن أهميته في إمكانية عمل رد (Reply) عليه وكتابة أمر `/restore` لاستعادة البيانات يدوياً في أي وقت.\n\n"
         "💡 يمكنك التحكم في تشغيل أو إيقاف النسخ الاحتياطي السحابي التلقائي إلى Telegraph واختيار مدة التجميد المناسبة من الأزرار أدناه:"
     )
     
@@ -1316,6 +1322,9 @@ def _send_admin_menu(chat_id):
             ],
             [
                 {"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}
+            ],
+            [
+                {"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}
             ],
             [
                 {"text": "❓ المساعدة", "callback_data": "cmd:admin_help"},
@@ -1448,6 +1457,7 @@ def handle_callback_query(callback):
                     [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
                     [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
                     [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
                     [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
                     [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
                 ]
@@ -1531,6 +1541,7 @@ def handle_callback_query(callback):
                     [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
                     [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
                     [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
                     [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
                     [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
                 ]
@@ -1564,6 +1575,21 @@ def handle_callback_query(callback):
             
         elif cmd == "manage_telegraph":
             _send_telegraph_menu(chat_id, callback)
+            return
+            
+        elif cmd == "explain_diff":
+            diff_text = (
+                "🔄 **الفرق التفصيلي بين الباك أب التلقائي ومزامنة Telegraph:**\n\n"
+                "💾 **1. النسخ الاحتياطي التلقائي (Local Backup):**\n"
+                "• **كيف يعمل؟** يقوم البوت بتجميع كافة البيانات (المشتركين، الفلاتر، المحظورين، إلخ) وإرسالها لك مباشرة في شات التليجرام كملف `.json` كل 3 دقائق.\n"
+                "• **فائدته:** يمنحك تحكماً يدوياً كاملاً؛ حيث يمكنك عمل رد (Reply) على أي ملف باك أب أرسله البوت وكتابة أمر `/restore` لاستعادة البيانات فوراً.\n\n"
+                "☁️ **2. مزامنة Telegraph السحابية (Telegraph Sync):**\n"
+                "• **كيف تعمل؟** يقوم البوت تلقائياً ومحلياً بحفظ نسخة مشفرة من قاعدة البيانات ورفعها سحابياً وتحديثها على صفحة Telegraph سحابية خاصة كل دقيقتين بصمت وبدون إرسال ملفات تملأ الشات.\n"
+                "• **فائدتها:** استرجاع البيانات تلقائياً بالكامل بدون أي تدخل بشري بمجرد تشغيل البوت أو نقله إلى سيرفر جديد كلياً في حال حدوث أي عطل أو حذف للملفات.\n\n"
+                "💡 **الخلاصة:** الباك أب التلقائي هو وسيلة الاستعادة **اليدوية** المضمونة بملفات تليجرام، بينما مزامنة Telegraph هي الملاذ **التلقائي والسحابي الصامت** للتعافي الذاتي عند إعادة التشغيل."
+            )
+            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": diff_text, "parse_mode": "Markdown"})
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
             return
             
         elif cmd == "delete_broadcast":
@@ -1709,6 +1735,7 @@ def handle_callback_query(callback):
                     [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
                     [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
                     [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
                     [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
                     [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
                 ]
