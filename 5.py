@@ -26,6 +26,14 @@ KHAMSAT_CACHE_TTL = 20
 # Backoff state
 backoff_until_khamsat = 0
 deep_scan_counter_khamsat = 0
+_proxy_cooldowns = {}       # {proxy_addr: until_timestamp}
+_proxy_fail_streak = {}     # {proxy_addr: consecutive_failures}
+_last_block_alert_ts = 0
+
+REQUEST_RETRY_ATTEMPTS = 3
+PROXY_BACKOFF_BASE_SECONDS = 1.0
+PROXY_BLOCK_BASE_SECONDS = 6.0
+PROXY_MAX_BACKOFF_SECONDS = 60.0
 
 # Uptime baseline
 bot_start_time = time.time()
@@ -81,6 +89,35 @@ def _new_scraper():
     """Create a fresh scraper session with random browser fingerprint."""
     target = random.choice(IMPERSONATE_TARGETS)
     return cffi_requests.Session(impersonate=target)
+
+
+def _is_proxy_cooled(proxy_addr):
+    """Return True if this proxy is temporarily cooled down."""
+    if not proxy_addr:
+        return False
+    return time.time() < _proxy_cooldowns.get(proxy_addr, 0)
+
+
+def _register_proxy_result(proxy_addr, ok=False, blocked=False):
+    """Track proxy health and assign exponential cooldown on failures."""
+    if not proxy_addr:
+        return 0.0, 0
+
+    if ok:
+        _proxy_fail_streak[proxy_addr] = 0
+        _proxy_cooldowns[proxy_addr] = 0
+        return 0.0, 0
+
+    streak = _proxy_fail_streak.get(proxy_addr, 0) + 1
+    _proxy_fail_streak[proxy_addr] = streak
+
+    base = PROXY_BLOCK_BASE_SECONDS if blocked else PROXY_BACKOFF_BASE_SECONDS
+    exp_power = min(streak - 1, 6)
+    delay = min(PROXY_MAX_BACKOFF_SECONDS, base * (2 ** exp_power))
+    delay *= random.uniform(0.85, 1.25)  # jitter to avoid synchronized retries
+
+    _proxy_cooldowns[proxy_addr] = time.time() + delay
+    return delay, streak
 
 scraper = _new_scraper()
 
@@ -727,9 +764,15 @@ def fetch_khamsat_projects(max_pages=8, max_attempts=12):
     proxy_idx = 0
     def get_next_proxy():
         nonlocal proxy_idx
-        while proxy_idx < len(all_proxies) and proxy_idx < max_attempts:
+        tries = 0
+        while proxy_idx < len(all_proxies) and tries < max_attempts:
             scheme, addr = all_proxies[proxy_idx]
             proxy_idx += 1
+            tries += 1
+
+            if _is_proxy_cooled(addr):
+                continue
+
             if PROXY_USER and PROXY_PASS and (scheme, addr) in premium_proxies:
                 pu = f"{scheme}://{PROXY_USER}:{PROXY_PASS}@{addr}"
                 pk = "premium"
@@ -740,6 +783,7 @@ def fetch_khamsat_projects(max_pages=8, max_attempts=12):
         return None, "direct", None
 
     chosen_proxies, proxy_kind, p_addr = get_next_proxy()
+    active_proxies = chosen_proxies
     all_items = []
     seen_in_fetch = set()
 
@@ -760,6 +804,7 @@ def fetch_khamsat_projects(max_pages=8, max_attempts=12):
                 items = _fetch_khamsat_page(page_url, headers, chosen_proxies, proxy_kind, p_addr)
                 if items is None:
                     chosen_proxies, proxy_kind, p_addr = get_next_proxy()
+                    active_proxies = chosen_proxies
                     if chosen_proxies is None:
                         break
                         
@@ -771,27 +816,60 @@ def fetch_khamsat_projects(max_pages=8, max_attempts=12):
                 seen_in_fetch.add(item["id"])
                 all_items.append(item)
                 
-        time.sleep(0.5)
+        time.sleep(random.uniform(0.25, 0.9))
 
     all_items = all_items[:200]
     if all_items:
         logger.info(f"Fetched {len(all_items)} Khamsat requests via {proxy_kind} ({p_addr})")
         _khamsat_project_cache["data"] = all_items
         _khamsat_project_cache["ts"] = time.time()
-    return all_items, proxy_kind, p_addr
+    return all_items, proxy_kind, p_addr, active_proxies
 
 def _fetch_khamsat_page(page_url, headers, proxies=None, proxy_kind="direct", p_addr=None):
-    global scraper, backoff_until_khamsat
-    try:
-        resp = scraper.get(page_url, headers=headers, proxies=proxies or {}, timeout=15)
-        if resp.status_code == 200:
-            return extract_khamsat_projects(resp.text)
-        elif resp.status_code in (429, 403):
-            logger.error(f"Khamsat returned {resp.status_code}. Backing off for 5 minutes.")
-            backoff_until_khamsat = time.time() + 300
-            _notify_admins(f"⚠️ تحذير: موقع خمسات قام بحظر الطلبات مؤقتاً (Error {resp.status_code}). تم إيقاف الفحص لمدة 5 دقائق.")
-    except Exception as e:
-        logger.warning(f"Khamsat Fetch error ({proxy_kind} {p_addr}): {e}")
+    global scraper, _last_block_alert_ts
+    for attempt in range(REQUEST_RETRY_ATTEMPTS):
+        try:
+            resp = scraper.get(page_url, headers=headers, proxies=proxies or {}, timeout=15)
+            if resp.status_code == 200:
+                _register_proxy_result(p_addr, ok=True)
+                return extract_khamsat_projects(resp.text)
+
+            if resp.status_code in (403, 429):
+                is_block = resp.status_code == 403
+                delay, streak = _register_proxy_result(p_addr, ok=False, blocked=is_block)
+                if is_block:
+                    now = time.time()
+                    if now - _last_block_alert_ts > 120:
+                        _last_block_alert_ts = now
+                        _notify_admins(
+                            f"⚠️ Khamsat {resp.status_code} على proxy `{p_addr}`. "
+                            f"تم تهدئة هذا البروكسي فقط لمدة ~{int(delay)} ثانية (streak={streak})."
+                        )
+                logger.warning(
+                    f"Khamsat returned {resp.status_code} on {proxy_kind} {p_addr}. "
+                    f"proxy cooldown ~{delay:.1f}s (attempt {attempt + 1}/{REQUEST_RETRY_ATTEMPTS})"
+                )
+                scraper = _new_scraper()
+                if attempt < REQUEST_RETRY_ATTEMPTS - 1:
+                    time.sleep(min(delay, 4.0))
+                continue
+
+            # Any other non-200 response gets a small proxy-level cooldown
+            delay, streak = _register_proxy_result(p_addr, ok=False, blocked=False)
+            logger.warning(
+                f"Khamsat HTTP {resp.status_code} on {proxy_kind} {p_addr}. "
+                f"proxy cooldown ~{delay:.1f}s (streak={streak})"
+            )
+            if attempt < REQUEST_RETRY_ATTEMPTS - 1:
+                time.sleep(min(delay, 2.0))
+        except Exception as e:
+            delay, streak = _register_proxy_result(p_addr, ok=False, blocked=False)
+            logger.warning(
+                f"Khamsat Fetch error ({proxy_kind} {p_addr}): {e} | "
+                f"proxy cooldown ~{delay:.1f}s (streak={streak}, attempt {attempt + 1}/{REQUEST_RETRY_ATTEMPTS})"
+            )
+            if attempt < REQUEST_RETRY_ATTEMPTS - 1:
+                time.sleep(min(delay, 2.0))
     return None
 
 def extract_khamsat_projects(html_text):
@@ -901,10 +979,7 @@ def truncate_description(desc, max_words=25):
 max_seen_id = 0
 
 def check_khamsat():
-    global max_seen_id, backoff_until_khamsat, deep_scan_counter_khamsat
-    
-    if time.time() < backoff_until_khamsat:
-        return
+    global max_seen_id, deep_scan_counter_khamsat
 
     deep_scan_counter_khamsat += 1
     pages_to_fetch = 5 if deep_scan_counter_khamsat % 20 == 0 else 1
@@ -912,7 +987,7 @@ def check_khamsat():
         global _khamsat_project_cache
         _khamsat_project_cache["ts"] = 0
 
-    projects, proxy_type, p_addr = fetch_khamsat_projects(max_pages=pages_to_fetch)
+    projects, proxy_type, p_addr, chosen_proxies = fetch_khamsat_projects(max_pages=pages_to_fetch)
     if not projects:
         return
 
@@ -948,7 +1023,7 @@ def check_khamsat():
         new_projects.sort(key=lambda x: int(x["id"]))
         
         for p in new_projects:
-            desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_kind, p_addr)
+            desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_type, p_addr)
             truncated_desc = truncate_description(desc, max_words=25)
             
             msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 *{p['title']}*"
@@ -1069,8 +1144,11 @@ def generate_visual_dashboard():
         ax2.text(0.1, 0.58, f"• Active Proxy Pool: {len(premium_proxies) + len(free_proxies)} IPs", fontsize=10, color='#FFFFFF')
         ax2.text(0.1, 0.46, f"• Limit: {len(subs)} / {MAX_SUBSCRIBERS} Subs", fontsize=10, color='#FFFFFF')
         
-        status_indicator = "HEALTHY" if backoff_until_khamsat < time.time() else "BACKING OFF"
-        indicator_color = "#00E676" if status_indicator == "HEALTHY" else "#FF1744"
+        now = time.time()
+        cooled_count = sum(1 for v in _proxy_cooldowns.values() if v > now)
+        total_proxy_pool = max(1, len(premium_proxies) + len(free_proxies))
+        status_indicator = "HEALTHY" if cooled_count < max(3, int(total_proxy_pool * 0.15)) else "DEGRADED"
+        indicator_color = "#00E676" if status_indicator == "HEALTHY" else "#FFB300"
         ax2.text(0.1, 0.30, f"• Scraper Status: {status_indicator}", fontsize=10, color='#FFFFFF')
         ax2.plot(0.85, 0.85, marker='o', markersize=12, color=indicator_color)
         
@@ -1581,7 +1659,7 @@ def handle_updates_loop(poll_interval=2):
                         count = int(parts[1])
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"⏳ جاري جلب آخر {count} طلبات..."})
                         
-                        projects, _, _ = fetch_khamsat_projects()
+                        projects, _, _, _ = fetch_khamsat_projects()
                             
                         if not projects:
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "❌ لم يتم العثور على طلبات حالياً."})
@@ -2021,7 +2099,7 @@ if __name__ == "__main__":
         threading.Thread(target=_periodic_tasks_loop, daemon=True).start()
         threading.Thread(target=telegraph_sync_thread, daemon=True).start()
         
-        startup_reqs, startup_proxy_type, startup_proxy_addr = fetch_khamsat_projects()
+        startup_reqs, startup_proxy_type, startup_proxy_addr, _ = fetch_khamsat_projects()
         if startup_reqs:
             if max_seen_id == 0:
                 seed_max_id(startup_reqs)
@@ -2049,7 +2127,14 @@ if __name__ == "__main__":
         
     # Send startup notifications
     if KHAMSAT_BOT_TOKEN:
-        _notify_admins("🚀 بدأت مراقبة طلبات 'خمسات' الآن..")
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage",
+                json={"chat_id": get_owner_id(), "text": "🚀 بدأت مراقبة طلبات 'خمسات' الآن.."},
+                timeout=10,
+            )
+        except Exception:
+            pass
         owner_startup_msg = (
             "🚀 تم تشغيل بوت خمسات بنجاح!\n\n"
             "لو حسيت إن الداتا طارت بسبب ريستارت السيرفر، مفيش مشكلة.\n"
