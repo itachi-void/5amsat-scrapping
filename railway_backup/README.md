@@ -1,8 +1,9 @@
 Railway Backup endpoint
 
 This small Flask service exposes:
+
 - POST /api/backup : store incoming backup JSON (requires Authorization Bearer token if `RAILWAY_BACKUP_TOKEN` is set)
-- GET  /api/backup : return latest backup JSON (requires token if set)
+- GET /api/backup : return latest backup JSON (requires token if set)
 
 Deployment (Railway CLI):
 
