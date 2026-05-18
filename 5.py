@@ -99,7 +99,6 @@ try:
 except Exception:
     pass
 logger.addHandler(_console_handler)
-logging.getLogger().addHandler(_console_handler)
 
 
 def _redact_sensitive_text(text):
