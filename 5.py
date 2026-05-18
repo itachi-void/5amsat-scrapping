@@ -2363,12 +2363,15 @@ def handle_updates_loop(poll_interval=2):
                         bio = io.BytesIO(backup_bytes)
                         bio.name = "system_backup_data.json"
                         target_id = BACKUP_CHAT_ID if BACKUP_CHAT_ID else chat_id
-                        requests.post(
+                        r = requests.post(
                             f"{base_url}/sendDocument",
                             data={"chat_id": target_id, "caption": "💾 نسخة احتياطية كاملة وشاملة لبوت خمسات — استخدم /restore بالرد على هذا الملف لاستعادة كافة البيانات دفعة واحدة."},
                             files={"document": ("system_backup_data.json", bio, "application/json")},
                             timeout=20
                         )
+                        if r.status_code != 200:
+                            err_desc = r.json().get("description", r.text) if r.headers.get("content-type", "").startswith("application/json") else r.text
+                            raise Exception(f"Telegram API Error {r.status_code}: {err_desc}")
                         if str(target_id) != str(chat_id):
                             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ تم إرسال النسخة الاحتياطية إلى مجموعة الباك أب المخصصة."})
                     except Exception as _be:
@@ -2716,14 +2719,18 @@ def _periodic_tasks_loop():
                     if KHAMSAT_BOT_TOKEN:
                         owner_id = get_owner_id()
                         target_chat_id = BACKUP_CHAT_ID if BACKUP_CHAT_ID else owner_id
-                        requests.post(
+                        r = requests.post(
                             f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendDocument",
                             data={"chat_id": target_chat_id, "caption": "📦 نسخة احتياطية تلقائية لبوت خمسات.\nلو الداتا طارت، اعمل Reply على الملف واكتب /restore"},
                             files={"document": ("system_backup_data.json", bio, "application/json")},
                             timeout=20
                         )
+                        if r.status_code == 200:
+                            logger.info("3-minute backup sent to owner/backup channel via Khamsat")
+                        else:
+                            err_desc = r.json().get("description", r.text) if r.headers.get("content-type", "").startswith("application/json") else r.text
+                            logger.error(f"3-minute backup Telegram API error (Status {r.status_code}): {err_desc}")
                     last_backup_sent = now
-                    logger.info("3-minute backup sent to owner via Khamsat")
                 except Exception as e:
                     logger.error(f"1-minute backup error: {e}")
 
