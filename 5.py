@@ -85,6 +85,9 @@ DATA_DIR = os.getenv("DATA_DIR", ".")
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR, exist_ok=True)
 
+from autobid_manager import AutobidManager
+autobid_mgr = AutobidManager(bot_type="khamsat", data_dir=DATA_DIR)
+
 # Logger Setup (Console + rotating file)
 _log_formatter = logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', datefmt='%H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -1107,12 +1110,12 @@ def fetch_khamsat_project_description(link, scraper_session, proxies, proxy_kind
         logger.warning(f"Error fetching Khamsat description: {e}")
     return ""
 
-def truncate_description(desc, max_words=25):
+def truncate_description(desc, max_words=30):
     if not desc:
         return ""
     words = desc.split()
     if len(words) > max_words:
-        return " ".join(words[:max_words]) + " ..."
+        return " ".join(words[:max_words]) + " ...."
     return desc
 
 
@@ -1167,9 +1170,10 @@ def check_khamsat():
         
         for p in new_projects:
             desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_type, p_addr)
-            truncated_desc = truncate_description(desc, max_words=25)
+            truncated_desc = truncate_description(desc, max_words=30)
+            truncated_title = truncate_description(p['title'], max_words=30)
             
-            msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 *{p['title']}*"
+            msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 *{truncated_title}*"
             if truncated_desc:
                 msg_text += f"\n\n📄 {truncated_desc}"
                 
@@ -1196,6 +1200,22 @@ def check_khamsat():
                 if success:
                     sent_count += 1
             _increment_stats(sent_count)
+
+            # Run Autobid evaluation in a separate thread to avoid blocking scraper
+            if autobid_mgr.config.get("enabled"):
+                def run_autobid_pipeline(proj, full_desc):
+                    try:
+                        res = autobid_mgr.evaluate_project(proj["title"], full_desc, link=proj["link"])
+                        if res and not res.get("no_draft"):
+                            admins_list = _get_all_admins()
+                            token = KHAMSAT_BOT_TOKEN
+                            base_url = f"https://api.telegram.org/bot{token}"
+                            for admin_id in admins_list:
+                                autobid_mgr.send_evaluation_card(admin_id, res, proj["link"], base_url)
+                    except Exception as ex:
+                        logger.error(f"Autobid evaluation error: {ex}")
+                
+                threading.Thread(target=run_autobid_pipeline, args=(p, desc), daemon=True).start()
 
 def seed_max_id(projects):
     global max_seen_id
@@ -1443,6 +1463,9 @@ def _send_admin_menu(chat_id):
                 {"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}
             ],
             [
+                {"text": "🤖 نظام التقديم التلقائي (Auto-Bid)", "callback_data": "cmd:autobid_menu"}
+            ],
+            [
                 {"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}
             ],
             [
@@ -1474,6 +1497,14 @@ def handle_callback_query(callback):
     role = 1
     if is_owner(chat_id): role = 3
     elif is_admin(chat_id): role = 2
+    
+    if data.startswith("autobid:"):
+        if role < 2:
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "هنهذر ولا اي", "show_alert": True})
+            return
+        handled = autobid_mgr.handle_callback(chat_id, data, cb_id, base_url)
+        if handled:
+            return
     
     # 1. Handle FAQ clicks (accessible by everyone, including subscribers)
     if data.startswith("faq:"):
@@ -1576,6 +1607,7 @@ def handle_callback_query(callback):
                     [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
                     [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
                     [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "🤖 نظام التقديم التلقائي (Auto-Bid)", "callback_data": "cmd:autobid_menu"}],
                     [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
                     [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
                     [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
@@ -1660,6 +1692,7 @@ def handle_callback_query(callback):
                     [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
                     [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
                     [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
+                    [{"text": "🤖 نظام التقديم التلقائي (Auto-Bid)", "callback_data": "cmd:autobid_menu"}],
                     [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
                     [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
                     [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
@@ -1694,6 +1727,26 @@ def handle_callback_query(callback):
             
         elif cmd == "manage_telegraph":
             _send_telegraph_menu(chat_id, callback)
+            return
+        elif cmd == "autobid_menu":
+            menu_text, keyboard = autobid_mgr.generate_admin_menu(chat_id)
+            if "message" in callback:
+                msg_id = callback["message"]["message_id"]
+                requests.post(f"{base_url}/editMessageText", json={
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "text": menu_text,
+                    "parse_mode": "Markdown",
+                    "reply_markup": keyboard
+                })
+            else:
+                requests.post(f"{base_url}/sendMessage", json={
+                    "chat_id": chat_id,
+                    "text": menu_text,
+                    "parse_mode": "Markdown",
+                    "reply_markup": keyboard
+                })
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
             return
             
         elif cmd == "explain_diff":
@@ -1997,6 +2050,16 @@ def handle_updates_loop(poll_interval=2):
                     continue
 
                 text = text.strip()
+
+                if text.startswith("/"):
+                    autobid_mgr.clear_user_state(chat_id)
+
+                if is_admin(chat_id) and text and not text.startswith("/"):
+                    if autobid_mgr.get_user_state(chat_id):
+                        handled = autobid_mgr.handle_reply(chat_id, text, base_url)
+                        if handled:
+                            continue
+
                 if not text.startswith("/"):
                     continue
 
@@ -2036,6 +2099,7 @@ def handle_updates_loop(poll_interval=2):
                     "/unmute":    2,
                     "/muteall":   2,
                     "/unmuteall": 2,
+                    "/autobid":   2,
                     "/approve":   2,
                     "/reject":    2,
                     "/pending":   2,
@@ -2086,6 +2150,15 @@ def handle_updates_loop(poll_interval=2):
 
                 elif cmd == "/menu":
                     _send_admin_menu(chat_id)
+
+                elif cmd == "/autobid":
+                    menu_text, keyboard = autobid_mgr.generate_admin_menu(chat_id)
+                    requests.post(f"{base_url}/sendMessage", json={
+                        "chat_id": chat_id,
+                        "text": menu_text,
+                        "parse_mode": "Markdown",
+                        "reply_markup": keyboard
+                    })
 
                 elif cmd == "/approve":
                     parts = text.split()
