@@ -1169,7 +1169,7 @@ def check_khamsat():
             desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_type, p_addr)
             truncated_desc = truncate_description(desc, max_words=30)
             
-            msg_text = f"مشروع جديد على خمسات:\n\n📝 *{p['title']}*"
+            msg_text = f"🚀 new form على خمسات:\n\n📝 *{p['title']}*"
             if truncated_desc:
                 msg_text += f"\n\n📄 {truncated_desc}"
                 
