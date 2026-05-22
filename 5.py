@@ -9,6 +9,8 @@ import gzip
 import hashlib
 import uuid
 import requests
+import openai
+from twilio.rest import Client as TwilioClient
 import logging
 import threading
 from logging.handlers import RotatingFileHandler
@@ -73,6 +75,11 @@ bot_start_time = time.time()
 
 # Configurations & Tokens (Auto-loaded from .env)
 KHAMSAT_BOT_TOKEN = None
+OPENAI_API_KEY = None
+TWILIO_ACCOUNT_SID = None
+TWILIO_AUTH_TOKEN = None
+TWILIO_FROM_NUMBER = None
+TWILIO_TO_NUMBER = None
 TELEGRAPH_TOKEN_KHAMSAT = "2182ffe6168f99027ca825ef33d364abc37cede07f0286aef1b9f993d791"
 TELEGRAPH_PATH_KHAMSAT = "DB-05-17"
 
@@ -207,7 +214,7 @@ def _proxy_rank_key(item):
 # ==============================================================================
 def load_all_configs():
     """Dynamically load configs from environment or local .env file."""
-    global KHAMSAT_BOT_TOKEN, PROXY_USER, PROXY_PASS, TELEGRAPH_TOKEN_KHAMSAT, TELEGRAPH_PATH_KHAMSAT, BACKUP_CHAT_ID
+    global KHAMSAT_BOT_TOKEN, PROXY_USER, PROXY_PASS, TELEGRAPH_TOKEN_KHAMSAT, TELEGRAPH_PATH_KHAMSAT, BACKUP_CHAT_ID, OPENAI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER, TWILIO_TO_NUMBER
     # Note: BACKUP_CHAT_ID pre-set to fallback; only override if env var is actually set
     
     KHAMSAT_BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -218,6 +225,11 @@ def load_all_configs():
         BACKUP_CHAT_ID = _env_backup_chat
     TELEGRAPH_TOKEN_KHAMSAT = os.getenv("TELEGRAPH_TOKEN", TELEGRAPH_TOKEN_KHAMSAT)
     TELEGRAPH_PATH_KHAMSAT = os.getenv("TELEGRAPH_PATH", TELEGRAPH_PATH_KHAMSAT)
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
+    TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+    TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER")
+    TWILIO_TO_NUMBER = os.getenv("TWILIO_TO_NUMBER")
 
     # Local .env path
     khamsat_env = "C:\\Users\\itachi\\Downloads\\5amsat-scrapping\\.env"
@@ -243,6 +255,11 @@ def load_all_configs():
                         TELEGRAPH_TOKEN_KHAMSAT = v
                     elif k == "TELEGRAPH_PATH":
                         TELEGRAPH_PATH_KHAMSAT = v
+                    elif k == "OPENAI_API_KEY": OPENAI_API_KEY = v
+                    elif k == "TWILIO_ACCOUNT_SID": TWILIO_ACCOUNT_SID = v
+                    elif k == "TWILIO_AUTH_TOKEN": TWILIO_AUTH_TOKEN = v
+                    elif k == "TWILIO_FROM_NUMBER": TWILIO_FROM_NUMBER = v
+                    elif k == "TWILIO_TO_NUMBER": TWILIO_TO_NUMBER = v
 
     logger.info(f"Config loaded: Khamsat Token={'Loaded' if KHAMSAT_BOT_TOKEN else 'Missing'}")
 
@@ -556,6 +573,21 @@ def _save_stats(stats_data):
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(stats_data, f, indent=4)
     os.replace(tmp_path, file_path)
+
+
+def make_urgent_call():
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_TO_NUMBER:
+        return
+    try:
+        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        call = client.calls.create(
+            twiml='<Response><Say language="ar-AE">مرحباً، هناك مشروع جديد هام جداً على موقع خمسات، يرجى تفقده فوراً.</Say></Response>',
+            to=TWILIO_TO_NUMBER,
+            from_=TWILIO_FROM_NUMBER
+        )
+        logger.info(f"Initiated urgent Twilio call: {call.sid}")
+    except Exception as e:
+        logger.error(f"Failed to make Twilio call: {e}")
 
 def _increment_stats(sent_count):
     if sent_count <= 0:
@@ -1175,7 +1207,8 @@ def check_khamsat():
                 
             reply_markup = {
                 "inline_keyboard": [
-                    [{"text": "الذهاب للطلب 🌐", "url": p['link']}]
+                    [{"text": "الذهاب للطلب 🌐", "url": p['link']}],
+                    [{"text": "✨ اكتب لي عرضاً", "callback_data": f"ai_proposal:{p['id']}"}]
                 ]
             }
             title_lower = p['title'].lower()
@@ -2679,6 +2712,23 @@ def handle_updates_loop(poll_interval=2):
 # ==============================================================================
 # PERIODIC TASKS LOOP (STATS & 1-MINUTE AUTO TELEGRAM BACKUPS)
 # ==============================================================================
+
+def daily_report_job():
+    while True:
+        import datetime
+        now = datetime.datetime.now()
+        # Sleep until midnight
+        next_midnight = (now + datetime.timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        time.sleep((next_midnight - now).total_seconds())
+        
+        subs = _load_subscribers()
+        stats = _get_stats()
+        sent_today = stats.get("total_sent", 0)
+        
+        report_text = f"📊 **تقرير السوق اليومي:**\n\nتم إرسال {sent_today} مشروع اليوم في تخصصاتك. استعد ليوم جديد غداً!"
+        for cid in subs:
+            _send_one(cid, report_text, parse_mode="Markdown")
+
 def _periodic_tasks_loop():
     """Send weekly statistics and 1-minute automatic backups to owner."""
     time.sleep(10)
@@ -2800,6 +2850,7 @@ if __name__ == "__main__":
     if KHAMSAT_BOT_TOKEN:
         threading.Thread(target=handle_updates_loop, daemon=True).start()
         threading.Thread(target=_periodic_tasks_loop, daemon=True).start()
+        threading.Thread(target=daily_report_job, daemon=True).start()
         threading.Thread(target=telegraph_sync_thread, daemon=True).start()
         
         startup_reqs, startup_proxy_type, startup_proxy_addr, _ = fetch_khamsat_projects()
@@ -2850,7 +2901,7 @@ if __name__ == "__main__":
             "🚀 تم تشغيل البوت بنجاح.\n"
             f"🖥️ السيرفر: {server_name}\n"
             f"🕒 الوقت: {startup_time}\n\n"
-            "لو محتاج استرجاع: اعمل Reply على آخر backup واكتب /restore"
+            "لو محتاج استرجاع: اعمل Reply على آخر backup واكتب /restore\n\n✨ **الميزات الجديدة مفعلة:**\n- ذكاء اصطناعي (AI Proposals)\n- فلاتر (/settings)\n- تقرير يومي (Daily Insight)\n- مكالمات طوارئ (Twilio)"
         )
         try:
             requests.post(f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage", json={"chat_id": get_owner_id(), "text": owner_startup_msg}, timeout=10)

@@ -4,3 +4,5 @@ curl_cffi
 python-dotenv
 matplotlib
 pillow
+openai
+twilio
