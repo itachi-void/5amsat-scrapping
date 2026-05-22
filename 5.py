@@ -2898,7 +2898,7 @@ if __name__ == "__main__":
         except Exception:
             pass
         owner_startup_msg = (
-            "🚀 تم تشغيل البوت بنجاح.\n"
+            "🚀 تم تشغيل البوت بنجاح   new version ..\n"
             f"🖥️ السيرفر: {server_name}\n"
             f"🕒 الوقت: {startup_time}\n\n"
             "لو محتاج استرجاع: اعمل Reply على آخر backup واكتب /restore\n\n✨ **الميزات الجديدة مفعلة:**\n- ذكاء اصطناعي (AI Proposals)\n- فلاتر (/settings)\n- تقرير يومي (Daily Insight)\n- مكالمات طوارئ (Twilio)"
