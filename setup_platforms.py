@@ -4,7 +4,7 @@ import shutil
 source_dir = r"c:\Users\itachi\Downloads\5amsat-scrapping"
 platforms = [
     {"name": "kafiil", "arabic": "كفيل", "url": "https://kafiil.com"},
-    {"name": "nqfezly", "arabic": "نفذلي", "url": "https://nafezly.com"}
+    {"name": "nafezly", "arabic": "نفذلي", "url": "https://nafezly.com"}
 ]
 
 for p in platforms:
