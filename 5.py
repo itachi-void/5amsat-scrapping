@@ -1107,12 +1107,12 @@ def fetch_khamsat_project_description(link, scraper_session, proxies, proxy_kind
         logger.warning(f"Error fetching Khamsat description: {e}")
     return ""
 
-def truncate_description(desc, max_words=25):
+def truncate_description(desc, max_words=30):
     if not desc:
         return ""
     words = desc.split()
     if len(words) > max_words:
-        return " ".join(words[:max_words]) + " ..."
+        return " ".join(words[:max_words]) + "...."
     return desc
 
 
@@ -1167,7 +1167,7 @@ def check_khamsat():
         
         for p in new_projects:
             desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_type, p_addr)
-            truncated_desc = truncate_description(desc, max_words=25)
+            truncated_desc = truncate_description(desc, max_words=30)
             
             msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 *{p['title']}*"
             if truncated_desc:
