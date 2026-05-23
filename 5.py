@@ -1128,7 +1128,7 @@ def fetch_khamsat_project_description(link, scraper_session, proxies, proxy_kind
                 if desc:
                     return desc
             
-            for selector in [".post_content", ".post-content", ".article-content", ".post_body", ".post__body", ".post_message", ".message"]:
+            for selector in ["article.replace_urls", "article", ".post_content", ".post-content", ".article-content", ".post_body", ".post__body", ".post_message", ".message"]:
                 d_el = soup.select_one(selector)
                 if d_el:
                     desc = d_el.get_text("\n", strip=True)
@@ -1201,7 +1201,7 @@ def check_khamsat():
             desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_type, p_addr)
             truncated_desc = truncate_description(desc, max_words=30)
             
-            msg_text = f"🚀 new form على خمسات:\n\n📝 *{p['title']}*"
+            msg_text = f"🚀  على خمسات:\n\n📝 *{p['title']}*"
             if truncated_desc:
                 msg_text += f"\n\n📄 {truncated_desc}"
                 
@@ -1507,6 +1507,46 @@ def handle_callback_query(callback):
     role = 1
     if is_owner(chat_id): role = 3
     elif is_admin(chat_id): role = 2
+    
+    if data.startswith("ai_proposal:"):
+        project_id = data.split("ai_proposal:")[1]
+        
+        requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "⏳ جاري دراسة المشروع وكتابة العرض...", "show_alert": True})
+        processing_msg = requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🤖 جاري توليد العرض بالذكاء الاصطناعي، يرجى الانتظار لحين اكتمال المعالجة..."})
+        msg_id_to_edit = processing_msg.json().get("result", {}).get("message_id") if processing_msg.status_code == 200 else None
+
+        def generate_and_send():
+            try:
+                if not OPENAI_API_KEY:
+                    if msg_id_to_edit:
+                        requests.post(f"{base_url}/editMessageText", json={"chat_id": chat_id, "message_id": msg_id_to_edit, "text": "❌ عذراً، مفتاح OpenAI غير متوفر."})
+                    return
+                project_url = f"https://khamsat.com/community/requests/{project_id}"
+                desc = fetch_khamsat_project_description(project_url, scraper, None, "direct", None)
+                if not desc:
+                    if msg_id_to_edit:
+                        requests.post(f"{base_url}/editMessageText", json={"chat_id": chat_id, "message_id": msg_id_to_edit, "text": "❌ عذراً، لم أتمكن من جلب تفاصيل المشروع."})
+                    return
+                client = openai.OpenAI(api_key=OPENAI_API_KEY)
+                prompt = f"اكتب عرض احترافي ومقنع وجذاب ومختصر للتقديم على هذا المشروع في موقع خمسات. \n\nتفاصيل المشروع:\n{desc}\n\nالعرض يجب أن يكون جاهزاً للنسخ واللصق."
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "أنت مستقل محترف على منصة خمسات. وظيفتك كتابة عروض قوية ومقنعة للعملاء."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=500,
+                    temperature=0.7
+                )
+                proposal = response.choices[0].message.content.strip()
+                if msg_id_to_edit:
+                    requests.post(f"{base_url}/editMessageText", json={"chat_id": chat_id, "message_id": msg_id_to_edit, "text": f"✨ **اقتراح العرض:**\n\n{proposal}\n\n💡 يمكنك نسخه وتقديمه.", "parse_mode": "Markdown"})
+            except Exception as e:
+                logger.error(f"Error generating proposal: {e}")
+                if msg_id_to_edit:
+                    requests.post(f"{base_url}/editMessageText", json={"chat_id": chat_id, "message_id": msg_id_to_edit, "text": "❌ حدث خطأ أثناء توليد العرض."})
+        threading.Thread(target=generate_and_send, daemon=True).start()
+        return
     
     # 1. Handle FAQ clicks (accessible by everyone, including subscribers)
     if data.startswith("faq:"):
@@ -2108,11 +2148,25 @@ def handle_updates_loop(poll_interval=2):
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🚫 تم حظرك من استخدام هذا البوت."})
                         continue
 
-                    if add_subscriber(chat_id):
+                    subs = _load_subscribers()
+                    if chat_id in subs:
                         welcome_msg = "لا تنسي الدعاء لنا و لامواتنا و اموات المسلمين\nوصلي علي النبي يا جدع"
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": welcome_msg})
+                    elif is_admin(chat_id):
+                        if add_subscriber(chat_id):
+                            welcome_msg = "لا تنسي الدعاء لنا و لامواتنا و اموات المسلمين\nوصلي علي النبي يا جدع"
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": welcome_msg})
+                        else:
+                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ عذراً، لا يمكن الاشتراك الآن (ربما وصل البوت للحد الأقصى)."})
                     else:
-                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ عذراً، لا يمكن الاشتراك الآن (ربما وصل البوت للحد الأقصى)."})
+                        with subscribers_lock:
+                            pending = _load_pending()
+                            pending.add(chat_id)
+                            _save_pending(pending)
+                        
+                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⏳ طلبك قيد المراجعة. سيتم إشعارك فور موافقة الإدارة."})
+                        admin_msg = f"🔔 طلب اشتراك جديد من المستخدم: {chat_id}\n\nللقبول استخدم: `/approve {chat_id}`\nللرفض استخدم: `/reject {chat_id}`"
+                        _notify_admins(admin_msg)
 
                     if role >= 2:
                         _send_admin_menu(chat_id)
