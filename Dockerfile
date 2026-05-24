@@ -1,18 +1,6 @@
-FROM python:3.11-slim
-
-# Install system dependencies required by curl_cffi
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    libcurl4-openssl-dev \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+FROM python:3.10-slim
 WORKDIR /app
-
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
+RUN pip install --no-cache-dir -r requirements.txt && playwright install
 COPY . .
-
 CMD ["python", "5.py"]
