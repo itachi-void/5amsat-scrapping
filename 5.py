@@ -286,7 +286,7 @@ def load_proxies():
     logger.info(f"Consolidated Proxy Pool: {len(premium_proxies)} premium, {len(free_proxies)} free proxies.")
 
 # ==============================================================================
-# PARAMETERIZED DATA STORAGE ACCESS LAYER (UPDATED WITH NEGATIVE KEYWORDS)
+# PARAMETERIZED DATA STORAGE ACCESS LAYER (UPDATED WITH NEW FILES)
 # ==============================================================================
 def _get_file_path(file_key):
     """Retrieve isolated path prefixing 'khamsat_' to keep existing databases intact."""
@@ -301,7 +301,10 @@ def _get_file_path(file_key):
         "stats": "bot_stats.json",
         "last_broadcast": "last_broadcast_msgs.json",
         "keywords": "keywords.json",
-        "neg_keywords": "negative_keywords.json"
+        "neg_keywords": "negative_keywords.json",
+        "budget_filters": "budget_filters.json",
+        "temp_mutes": "temp_mutes.json",
+        "old_projects": "old_projects.json"
     }
     return os.path.join(DATA_DIR, f"khamsat_{names[file_key]}")
 
@@ -577,7 +580,6 @@ def _save_keywords(keywords_dict):
         json.dump(keywords_dict, f, indent=4, ensure_ascii=False)
     os.replace(tmp_path, file_path)
 
-# NEW: Negative keywords support
 def _load_neg_keywords():
     file_path = _get_file_path("neg_keywords")
     if not os.path.exists(file_path):
@@ -594,6 +596,58 @@ def _save_neg_keywords(neg_dict):
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(neg_dict, f, indent=4, ensure_ascii=False)
     os.replace(tmp_path, file_path)
+
+# ========== NEW DATA FUNCTIONS ==========
+def _load_old_projects():
+    path = os.path.join(DATA_DIR, "khamsat_old_projects.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return []
+
+def _save_old_projects(projects):
+    path = os.path.join(DATA_DIR, "khamsat_old_projects.json")
+    tmp = path + ".tmp"
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(projects, f, indent=2, ensure_ascii=False)
+    os.replace(tmp, path)
+
+def _load_budget_filters():
+    path = _get_file_path("budget_filters")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def _save_budget_filters(filters):
+    path = _get_file_path("budget_filters")
+    tmp = path + ".tmp"
+    with open(tmp, 'w') as f:
+        json.dump(filters, f, indent=4)
+    os.replace(tmp, path)
+
+def _load_temp_mutes():
+    path = _get_file_path("temp_mutes")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, 'r') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def _save_temp_mutes(mutes):
+    path = _get_file_path("temp_mutes")
+    tmp = path + ".tmp"
+    with open(tmp, 'w') as f:
+        json.dump(mutes, f, indent=4)
+    os.replace(tmp, path)
 
 # ==============================================================================
 # SUBSCRIBER MUTATION ENGINE
@@ -672,7 +726,6 @@ def _is_rate_limited(chat_id):
     _rate_limit_map[key] = now
     return False
 
-# NEW: Reset user when bot is blocked
 def reset_user_to_new(chat_id):
     """Reset user to fresh state when bot is blocked."""
     with subscribers_lock:
@@ -686,12 +739,15 @@ def reset_user_to_new(chat_id):
             pend.discard(chat_id)
             _save_pending(pend)
 
-# NEW: Monitored send that detects block and auto-resets
 def send_telegram_monitored(chat_id, text, reply_markup=None, parse_mode="Markdown", retries=3):
     """Send message and reset user if bot is blocked."""
     if not KHAMSAT_BOT_TOKEN:
         return False
     url = f"https://api.telegram.org/bot{KHAMSAT_BOT_TOKEN}/sendMessage"
+    # Truncate text to 40 words before sending
+    words = text.split()
+    if len(words) > 40:
+        text = " ".join(words[:40]) + " ...."
     payload = {"chat_id": chat_id, "text": text, "parse_mode": parse_mode}
     if reply_markup:
         payload["reply_markup"] = reply_markup
@@ -710,13 +766,19 @@ def send_telegram_monitored(chat_id, text, reply_markup=None, parse_mode="Markdo
     return False
 
 # ==============================================================================
-# FILTERING ENGINE (with negative keywords)
+# FILTERING ENGINE (with negative keywords and budget)
 # ==============================================================================
-def is_project_wanted(chat_id, title, desc):
-    """Check positive and negative keywords for a user."""
+def is_project_wanted(chat_id, title, desc, price=None):
+    """Check positive and negative keywords and budget for a user."""
     cid_str = str(chat_id)
     title_low = title.lower()
     desc_low = desc.lower()
+
+    # Budget filter
+    budget_filters = _load_budget_filters()
+    user_min_budget = budget_filters.get(cid_str)
+    if user_min_budget is not None and price is not None and price < user_min_budget:
+        return False
 
     # Negative keywords (exclude)
     neg_map = _load_neg_keywords()
@@ -781,6 +843,8 @@ def generate_full_backup():
         "stats": _get_file_path("stats"),
         "keywords": _get_file_path("keywords"),
         "neg_keywords": _get_file_path("neg_keywords"),
+        "budget_filters": _get_file_path("budget_filters"),
+        "temp_mutes": _get_file_path("temp_mutes")
     }
     for key, fpath in files_to_backup.items():
         if os.path.exists(fpath):
@@ -791,6 +855,16 @@ def generate_full_backup():
                 backup_data[key] = None
         else:
             backup_data[key] = None
+    # Also backup old projects separately (plain JSON)
+    old_projects_path = os.path.join(DATA_DIR, "khamsat_old_projects.json")
+    if os.path.exists(old_projects_path):
+        try:
+            with open(old_projects_path, 'r', encoding='utf-8') as f:
+                backup_data["old_projects"] = json.load(f)
+        except:
+            backup_data["old_projects"] = None
+    else:
+        backup_data["old_projects"] = None
     return backup_data
 
 def restore_full_backup(backup_data):
@@ -805,6 +879,8 @@ def restore_full_backup(backup_data):
         "stats": _get_file_path("stats"),
         "keywords": _get_file_path("keywords"),
         "neg_keywords": _get_file_path("neg_keywords"),
+        "budget_filters": _get_file_path("budget_filters"),
+        "temp_mutes": _get_file_path("temp_mutes")
     }
     for key, fpath in files_to_backup.items():
         if key in backup_data and backup_data[key] is not None:
@@ -815,6 +891,16 @@ def restore_full_backup(backup_data):
                 os.replace(tmp, fpath)
             except Exception as e:
                 logger.error(f"Failed to restore {key} for Khamsat: {e}")
+    # Restore old projects
+    if "old_projects" in backup_data and backup_data["old_projects"] is not None:
+        old_path = os.path.join(DATA_DIR, "khamsat_old_projects.json")
+        tmp = old_path + ".tmp"
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(backup_data["old_projects"], f, indent=2, ensure_ascii=False)
+            os.replace(tmp, old_path)
+        except Exception as e:
+            logger.error(f"Failed to restore old_projects: {e}")
 
 def generate_system_backup():
     return {"khamsat": generate_full_backup(), "timestamp": time.time()}
@@ -1079,7 +1165,21 @@ def truncate_description(desc, max_words=30):
     return desc
 
 # ==============================================================================
-# MONITORING ENGINE & REAL-TIME EMITTERS (UPDATED WITH NEW FILTER)
+# PROXY SPEED TEST FUNCTION
+# ==============================================================================
+def test_proxy_speed(proxy_dict):
+    import time
+    try:
+        start = time.time()
+        r = requests.get("https://httpbin.org/get", proxies=proxy_dict, timeout=10)
+        if r.status_code == 200:
+            return time.time() - start
+    except:
+        pass
+    return None
+
+# ==============================================================================
+# MONITORING ENGINE & REAL-TIME EMITTERS (UPDATED WITH NEW FEATURES)
 # ==============================================================================
 max_seen_id = 0
 
@@ -1121,19 +1221,61 @@ def check_khamsat():
     if new_projects:
         subs = _load_subscribers()
         muted = _load_muted_users()
-        targets = (subs | _get_all_admins()) - muted
+        # Check temporary mutes and remove expired
+        temp_mutes = _load_temp_mutes()
+        now = time.time()
+        changed = False
+        for cid_str, until in list(temp_mutes.items()):
+            if until <= now:
+                del temp_mutes[cid_str]
+                # Also remove from permanent muted if needed? We keep original logic: temp mutes are separate.
+                # But to be safe, we also remove from muted_users (original mute set)
+                mu = _load_muted_users()
+                mu.discard(int(cid_str))
+                _save_muted_users(mu)
+                changed = True
+        if changed:
+            _save_temp_mutes(temp_mutes)
+        # Combine muted: permanent + temporary
+        muted_temp_ids = set(int(cid) for cid in temp_mutes.keys())
+        all_muted = muted | muted_temp_ids
+        targets = (subs | _get_all_admins()) - all_muted
         new_projects.sort(key=lambda x: int(x["id"]))
+
+        # Load old projects to append new ones
+        old_projects = _load_old_projects()
 
         for p in new_projects:
             desc = fetch_khamsat_project_description(p['link'], scraper, chosen_proxies, proxy_type, p_addr)
             truncated_desc = truncate_description(desc, max_words=30)
             truncated_title = truncate_description(p['title'], max_words=30)
 
+            # Extract price from description
+            price = None
+            price_match = re.search(r'(\d+(?:\.\d+)?)\s*(ريال|ر.س|sar|SAR|budget|ميزانية)', desc, re.IGNORECASE)
+            if price_match:
+                try:
+                    price = float(price_match.group(1))
+                except:
+                    pass
+
+            # Save to old projects (keep last 200)
+            old_projects.insert(0, {
+                "id": p["id"],
+                "title": p["title"],
+                "link": p["link"],
+                "desc": desc[:500],
+                "price": price,
+                "ts": time.time()
+            })
+            old_projects = old_projects[:200]
+            _save_old_projects(old_projects)
+
             msg_text = f"🚀 طلب جديد على خمسات:\n\n📝 *{truncated_title}*"
             if truncated_desc:
                 msg_text += f"\n\n📄 {truncated_desc}"
 
-            # NEW: AI button for generating smart offer
+            # AI button
             reply_markup = {
                 "inline_keyboard": [
                     [{"text": "الذهاب للطلب 🌐", "url": p['link']}],
@@ -1143,14 +1285,14 @@ def check_khamsat():
 
             sent_count = 0
             for cid in targets:
-                if not is_project_wanted(cid, p['title'], desc):
+                if not is_project_wanted(cid, p['title'], desc, price):
                     continue
                 success, _ = _send_one(cid, msg_text, reply_markup=reply_markup, parse_mode="Markdown")
                 if success:
                     sent_count += 1
             _increment_stats(sent_count)
 
-            # Auto-bid evaluation (unchanged)
+            # Auto-bid evaluation
             if autobid_mgr.config.get("enabled"):
                 def run_autobid_pipeline(proj, full_desc):
                     try:
@@ -1197,7 +1339,7 @@ def send_startup_snapshot(projects):
         _send_one(cid, msg_text)
 
 # ==============================================================================
-# TELEGRAM BOT CONTROLLERS (ADMIN INTERFACES)
+# TELEGRAM BOT CONTROLLERS (ADMIN INTERFACES) - KEEP AS ORIGINAL WITH MINOR ADDITIONS
 # ==============================================================================
 def generate_visual_dashboard():
     try:
@@ -1367,6 +1509,8 @@ def _send_admin_menu(chat_id):
             [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
             [{"text": "🤖 نظام التقديم التلقائي (Auto-Bid)", "callback_data": "cmd:autobid_menu"}],
             [{"text": "🔍 كلمات سلبية (استبعاد)", "callback_data": "cmd:neg_filter_menu"}],
+            [{"text": "💰 فلتر السعر", "callback_data": "cmd:budget_menu"}],
+            [{"text": "🔎 بحث في الطلبات القديمة", "callback_data": "cmd:search_menu"}],
             [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
             [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
             [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
@@ -1401,24 +1545,19 @@ def handle_callback_query(callback):
         if handled:
             return
 
-    # NEW: AI generation callback
+    # AI generation callback
     if data.startswith("ai_gen:"):
         try:
             project_id = data.split(":", 1)[1]
-            # Find project details from cache or fetch fresh
             projects, _, _, _ = fetch_khamsat_projects(max_pages=1)
             proj = next((p for p in projects if p["id"] == project_id), None)
             if not proj:
                 requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "عذراً، لم أجد بيانات هذا الطلب.", "show_alert": True})
                 return
-            # Fetch full description
             desc = fetch_khamsat_project_description(proj['link'], scraper, None, "direct", None)
-            # Use autobid_mgr to generate a proposal
             evaluation = autobid_mgr.evaluate_project(proj["title"], desc, link=proj["link"])
             if evaluation and not evaluation.get("no_draft"):
-                # Send the generated draft to the user
                 proposal_text = evaluation.get("draft", "لم أتمكن من توليد عرض ذكي الآن، حاول مرة أخرى لاحقاً.")
-                # Optionally add a link to the project
                 proposal_text += f"\n\n🔗 [رابط الطلب]({proj['link']})"
                 send_telegram_monitored(chat_id, proposal_text, parse_mode="Markdown")
                 requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "✅ تم توليد العرض الذكي بنجاح!"})
@@ -1430,7 +1569,7 @@ def handle_callback_query(callback):
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": "حدث خطأ أثناء التوليد.", "show_alert": True})
         return
 
-    # FAQ clicks (accessible by everyone)
+    # FAQ clicks
     if data.startswith("faq:"):
         faq_key = data.split("faq:", 1)[1]
         if faq_key == "how_works":
@@ -1443,7 +1582,7 @@ def handle_callback_query(callback):
         requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
         return
 
-    # Admin operations (same as original, with minor additions)
+    # Admin operations (backup, telegraph, etc.) - keep as original but add new menu handlers
     if data.startswith("backup_op:"):
         op = data.split("backup_op:", 1)[1]
         if role < 2:
@@ -1479,53 +1618,8 @@ def handle_callback_query(callback):
             backup_freeze_until = 0
             alert_text = "🔴 تم تجميد الباك أب نهائياً ولن يتم إرساله تلقائياً."
         elif op == "back_to_menu":
-            # re-render admin menu
-            status_emoji = "🔔" if notifications_active else "🔕"
-            status_text = "تشغيل الإشعارات" if not notifications_active else "إيقاف الإشعارات"
-            now = time.time()
-            if not backup_active:
-                backup_status = "🔴 الباك اب: مجمد نهائياً"
-            elif now < backup_freeze_until:
-                remaining_sec = int(backup_freeze_until - now)
-                m, s = divmod(remaining_sec, 60)
-                h, m = divmod(m, 60)
-                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
-                backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
-            else:
-                backup_status = "🟢 الباك اب: يعمل تلقائياً"
-            if not telegraph_active:
-                telegraph_status = "🔴 مزامنة Telegraph: مغلقة"
-            elif now < telegraph_freeze_until:
-                remaining_sec = int(telegraph_freeze_until - now)
-                m, s = divmod(remaining_sec, 60)
-                h, m = divmod(m, 60)
-                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
-                telegraph_status = f"❄️ مزامنة Telegraph: مجمدة (باقي {time_str})"
-            else:
-                telegraph_status = "🟢 مزامنة Telegraph: تعمل تلقائياً"
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "👨‍💻 إدارة الأدمنز", "callback_data": "cmd:manage_admins"}],
-                    [{"text": "⏳ طلبات معلقة", "callback_data": "cmd:view_pending"}, {"text": "👥 المشتركين", "callback_data": "cmd:view_subs"}],
-                    [{"text": "🚫 المحظورين", "callback_data": "cmd:view_blocked"}, {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}],
-                    [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
-                    [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
-                    [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
-                    [{"text": "🤖 نظام التقديم التلقائي (Auto-Bid)", "callback_data": "cmd:autobid_menu"}],
-                    [{"text": "🔍 كلمات سلبية (استبعاد)", "callback_data": "cmd:neg_filter_menu"}],
-                    [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
-                    [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
-                    [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
-                ]
-            }
-            if "message" in callback:
-                msg_id = callback["message"]["message_id"]
-                requests.post(f"{base_url}/editMessageText", json={
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "text": "👑 لوحة تحكم أدمن بوت خمسات:",
-                    "reply_markup": keyboard
-                })
+            # Re-render admin menu
+            _send_admin_menu(chat_id)
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
             return
         _save_notifications_state()
@@ -1560,53 +1654,7 @@ def handle_callback_query(callback):
             telegraph_freeze_until = 0
             alert_text = "🔴 تم تعطيل مزامنة Telegraph نهائياً."
         elif op == "back_to_menu":
-            # re-render admin menu
-            status_emoji = "🔔" if notifications_active else "🔕"
-            status_text = "تشغيل الإشعارات" if not notifications_active else "إيقاف الإشعارات"
-            now = time.time()
-            if not backup_active:
-                backup_status = "🔴 الباك اب: مجمد نهائياً"
-            elif now < backup_freeze_until:
-                remaining_sec = int(backup_freeze_until - now)
-                m, s = divmod(remaining_sec, 60)
-                h, m = divmod(m, 60)
-                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
-                backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
-            else:
-                backup_status = "🟢 الباك اب: يعمل تلقائياً"
-            if not telegraph_active:
-                telegraph_status = "🔴 مزامنة Telegraph: مغلقة"
-            elif now < telegraph_freeze_until:
-                remaining_sec = int(telegraph_freeze_until - now)
-                m, s = divmod(remaining_sec, 60)
-                h, m = divmod(m, 60)
-                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
-                telegraph_status = f"❄️ مزامنة Telegraph: مجمدة (باقي {time_str})"
-            else:
-                telegraph_status = "🟢 مزامنة Telegraph: تعمل تلقائياً"
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "👨‍💻 إدارة الأدمنز", "callback_data": "cmd:manage_admins"}],
-                    [{"text": "⏳ طلبات معلقة", "callback_data": "cmd:view_pending"}, {"text": "👥 المشتركين", "callback_data": "cmd:view_subs"}],
-                    [{"text": "🚫 المحظورين", "callback_data": "cmd:view_blocked"}, {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}],
-                    [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
-                    [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
-                    [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
-                    [{"text": "🤖 نظام التقديم التلقائي (Auto-Bid)", "callback_data": "cmd:autobid_menu"}],
-                    [{"text": "🔍 كلمات سلبية (استبعاد)", "callback_data": "cmd:neg_filter_menu"}],
-                    [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
-                    [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
-                    [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
-                ]
-            }
-            if "message" in callback:
-                msg_id = callback["message"]["message_id"]
-                requests.post(f"{base_url}/editMessageText", json={
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "text": "👑 لوحة تحكم أدمن بوت خمسات:",
-                    "reply_markup": keyboard
-                })
+            _send_admin_menu(chat_id)
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
             return
         _save_notifications_state()
@@ -1652,6 +1700,20 @@ def handle_callback_query(callback):
                 text = f"🔍 **الكلمات السلبية الحالية (المستبعدة):**\n\n" + "\n".join(f"- {kw}" for kw in neg_filters) + "\n\nلإزالتها: `/negfilter_clear`"
             else:
                 text = "🔍 **لا توجد كلمات سلبية.**\n\nاستخدم `/negfilter كلمة1, كلمة2` لاستبعاد المشاريع التي تحتوي على هذه الكلمات."
+            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+            return
+        elif cmd == "budget_menu":
+            current = _load_budget_filters().get(str(chat_id))
+            if current:
+                text = f"💰 فلتر السعر الحالي: {current} ريال فأكثر.\n\nلتعديله: `/budget_min <رقم>`\nلإلغائه: `/budget_clear`"
+            else:
+                text = "💰 **فلتر السعر غير مفعل.**\n\nاستخدم `/budget_min <رقم>` لاستقبال الطلبات التي ميزانيتها أكبر من أو تساوي هذا الرقم فقط."
+            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+            requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
+            return
+        elif cmd == "search_menu":
+            text = "🔎 **البحث في الطلبات القديمة**\n\nاستخدم الأمر `/search <كلمة>` للبحث في آخر 200 طلب.\nمثال: `/search تصميم`"
             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
             return
@@ -1763,51 +1825,8 @@ def handle_callback_query(callback):
             _save_notifications_state()
             state_label = "✅ تم تشغيل الإشعارات وجاري الفحص المستمر لموقع خمسات!" if notifications_active else "🔕 تم إيقاف الإشعارات وتجميد الفحص لموقع خمسات مؤقتاً."
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id, "text": state_label, "show_alert": True})
-            status_emoji = "🔔" if notifications_active else "🔕"
-            status_text = "تشغيل الإشعارات" if not notifications_active else "إيقاف الإشعارات"
-            now = time.time()
-            if not backup_active:
-                backup_status = "🔴 الباك اب: مجمد نهائياً"
-            elif now < backup_freeze_until:
-                remaining_sec = int(backup_freeze_until - now)
-                m, s = divmod(remaining_sec, 60)
-                h, m = divmod(m, 60)
-                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
-                backup_status = f"❄️ الباك اب: مجمد (باقي {time_str})"
-            else:
-                backup_status = "🟢 الباك اب: يعمل تلقائياً"
-            if not telegraph_active:
-                telegraph_status = "🔴 مزامنة Telegraph: مغلقة"
-            elif now < telegraph_freeze_until:
-                remaining_sec = int(telegraph_freeze_until - now)
-                m, s = divmod(remaining_sec, 60)
-                h, m = divmod(m, 60)
-                time_str = f"{h}س {m}د" if h > 0 else f"{m}د"
-                telegraph_status = f"❄️ مزامنة Telegraph: مجمدة (باقي {time_str})"
-            else:
-                telegraph_status = "🟢 مزامنة Telegraph: تعمل تلقائياً"
-            keyboard = {
-                "inline_keyboard": [
-                    [{"text": "👨‍💻 إدارة الأدمنز", "callback_data": "cmd:manage_admins"}],
-                    [{"text": "⏳ طلبات معلقة", "callback_data": "cmd:view_pending"}, {"text": "👥 المشتركين", "callback_data": "cmd:view_subs"}],
-                    [{"text": "🚫 المحظورين", "callback_data": "cmd:view_blocked"}, {"text": "📊 حالة البوت", "callback_data": "cmd:view_stats"}],
-                    [{"text": f"{status_emoji} {status_text}", "callback_data": "cmd:toggle_notifications"}],
-                    [{"text": backup_status, "callback_data": "cmd:manage_backup"}],
-                    [{"text": telegraph_status, "callback_data": "cmd:manage_telegraph"}],
-                    [{"text": "🤖 نظام التقديم التلقائي (Auto-Bid)", "callback_data": "cmd:autobid_menu"}],
-                    [{"text": "🔍 كلمات سلبية (استبعاد)", "callback_data": "cmd:neg_filter_menu"}],
-                    [{"text": "🔄 الفرق بين الباك أب والمزامنة", "callback_data": "cmd:explain_diff"}],
-                    [{"text": "❓ المساعدة", "callback_data": "cmd:admin_help"}, {"text": "📢 بث رسالة", "callback_data": "cmd:admin_broadcast_info"}],
-                    [{"text": "🚀 إرسال آخر الطلبات", "callback_data": "cmd:send_last_5"}]
-                ]
-            }
-            if "message" in callback:
-                msg_id = callback["message"]["message_id"]
-                requests.post(f"{base_url}/editMessageReplyMarkup", json={
-                    "chat_id": chat_id,
-                    "message_id": msg_id,
-                    "reply_markup": keyboard
-                })
+            # Update admin menu inline
+            _send_admin_menu(chat_id)
         elif cmd == "admin_help":
             help_text = (
                 "❓ **دليل أوامر الأدمن الكاملة لبوت خمسات (Admin & Owner Commands):**\n\n"
@@ -1823,8 +1842,8 @@ def handle_callback_query(callback):
                 "⏳ `/pending` — عرض طلبات الاشتراك المعلقة\n"
                 "🚫 `/block <id>` — حظر مستخدم نهائياً\n"
                 "🔓 `/unblock <id>` — إلغاء حظر مستخدم\n"
-                "🔕 `/mute <id>` — كتم إشعارات مستخدم معين بقوة\n"
-                "🔔 `/unmute <id>` — إلغاء كتم إشعارات مستخدم معين\n"
+                "🔕 `/mute <id> [مدة]` — كتم إشعارات مستخدم (مدة اختيارية: 30m, 2h, 1d)\n"
+                "🔔 `/unmute <id>` — إلغاء كتم إشعارات مستخدم\n"
                 "🔇 `/muteall` — كتم إشعارات جميع المشتركين بقوة\n"
                 "🔊 `/unmuteall` — إلغاء كتم إشعارات جميع المشتركين\n"
                 "📢 `/broadcast <رسالة>` — إرسال بث عام للجميع مع ميزة المسح التفاعلي\n"
@@ -1839,7 +1858,14 @@ def handle_callback_query(callback):
                 "🔍 **أوامر الكلمات السلبية (Negative Filters):**\n"
                 "`/negfilter كلمة1, كلمة2` — استبعاد المشاريع التي تحتوي على هذه الكلمات\n"
                 "`/mynegfilters` — عرض الكلمات السلبية الحالية\n"
-                "`/negfilter_clear` — مسح جميع الكلمات السلبية"
+                "`/negfilter_clear` — مسح جميع الكلمات السلبية\n\n"
+                "💰 **أوامر فلتر السعر:**\n"
+                "`/budget_min <رقم>` — استقبال فقط الطلبات التي ميزانيتها >= الرقم\n"
+                "`/budget_clear` — إلغاء فلتر السعر\n\n"
+                "🔎 **البحث في الطلبات القديمة:**\n"
+                "`/search <كلمة>` — البحث في آخر 200 طلب\n\n"
+                "🚀 **اختبار سرعة البروكسيات:**\n"
+                "`/proxy_test` — عرض أسرع 5 بروكسيات في الوقت الحالي"
             )
             requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": help_text, "parse_mode": "Markdown"})
             requests.post(f"{base_url}/answerCallbackQuery", json={"callback_query_id": cb_id})
@@ -1897,7 +1923,7 @@ def health_monitor_loop():
         time.sleep(60)
 
 # ==============================================================================
-# UPDATES HANDLER (COMMAND ROUTER)
+# UPDATES HANDLER (COMMAND ROUTER) - ADD NEW COMMANDS
 # ==============================================================================
 def handle_updates_loop(poll_interval=2):
     if not KHAMSAT_BOT_TOKEN:
@@ -1949,6 +1975,9 @@ def handle_updates_loop(poll_interval=2):
                     "/mute": 2, "/unmute": 2, "/muteall": 2, "/unmuteall": 2, "/autobid": 2,
                     "/approve": 2, "/reject": 2, "/pending": 2, "/status": 2, "/dashboard": 2, "/vstatus": 2,
                     "/negfilter": 2, "/mynegfilters": 2, "/negfilter_clear": 2,
+                    "/budget_min": 2, "/budget_clear": 2,
+                    "/search": 2,
+                    "/proxy_test": 2,
                     "/start": 1, "/subscribe": 1, "/unsubscribe": 1, "/mymute": 1, "/pause": 1,
                     "/myunmute": 1, "/resume": 1, "/ping": 1, "/help": 1, "/filter": 1,
                     "/myfilters": 1, "/filter_clear": 1, "/filter_off": 1,
@@ -1962,7 +1991,7 @@ def handle_updates_loop(poll_interval=2):
                 if role == 1 and _is_rate_limited(chat_id):
                     continue
 
-                # ----- COMMAND HANDLERS -----
+                # ----- COMMAND HANDLERS (new and existing) -----
                 if cmd in ("/start", "/subscribe"):
                     blocked = _load_blocked()
                     if chat_id in blocked:
@@ -2098,37 +2127,66 @@ def handle_updates_loop(poll_interval=2):
                         requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /unblock <id>"})
                 elif cmd == "/mute":
                     parts = text.split()
-                    if len(parts) >= 2:
-                        try:
-                            target_id = int(parts[1].strip())
-                            if target_id == get_owner_id():
-                                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لا يمكنك كتم إشعارات المالك!"})
-                            else:
-                                with subscribers_lock:
-                                    mu = _load_muted_users()
-                                    mu.add(target_id)
-                                    _save_muted_users(mu)
-                                requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"🔕 تم كتم إشعارات المستخدم {target_id} بنجاح."})
-                                send_telegram_monitored(target_id, "🔕 لقد قام الأدمن بكتم إشعاراتك مؤقتاً.")
-                        except ValueError:
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
+                    if len(parts) < 2:
+                        send_telegram_monitored(chat_id, "استخدم: `/mute <id> [مدة]`\nمثال: `/mute 123456 2h`", parse_mode="Markdown")
+                        continue
+                    target_id = parts[1].strip()
+                    try:
+                        target_id = int(target_id)
+                    except:
+                        send_telegram_monitored(chat_id, "⚠️ ID غير صحيح")
+                        continue
+                    if target_id == get_owner_id():
+                        send_telegram_monitored(chat_id, "⚠️ لا يمكن كتم المالك")
+                        continue
+                    duration_str = parts[2] if len(parts) >= 3 else None
+                    if duration_str:
+                        minutes = parse_duration(duration_str)
+                        if minutes is None:
+                            send_telegram_monitored(chat_id, "⚠️ مدة غير صالحة. استخدم: `30m`, `2h`, `1d`", parse_mode="Markdown")
+                            continue
+                        # Temporary mute
+                        temp_mutes = _load_temp_mutes()
+                        temp_mutes[str(target_id)] = time.time() + minutes * 60
+                        _save_temp_mutes(temp_mutes)
+                        # Also add to permanent muted set to block messages
+                        mu = _load_muted_users()
+                        mu.add(target_id)
+                        _save_muted_users(mu)
+                        h, m = divmod(minutes, 60)
+                        d, h = divmod(h, 24)
+                        time_str = f"{d} يوم" if d else (f"{h} ساعة" if h else f"{m} دقيقة")
+                        send_telegram_monitored(chat_id, f"🔕 تم كتم المستخدم {target_id} لمدة {time_str}.")
+                        send_telegram_monitored(target_id, f"🔕 تم كتم إشعاراتك لمدة {time_str} بواسطة الأدمن.")
                     else:
-                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /mute <id>"})
+                        # Permanent mute
+                        mu = _load_muted_users()
+                        mu.add(target_id)
+                        _save_muted_users(mu)
+                        send_telegram_monitored(chat_id, f"🔕 تم كتم المستخدم {target_id} بشكل دائم.")
+                        send_telegram_monitored(target_id, "🔕 تم كتم إشعاراتك بشكل دائم بواسطة الأدمن.")
                 elif cmd == "/unmute":
                     parts = text.split()
-                    if len(parts) >= 2:
-                        try:
-                            target_id = int(parts[1].strip())
-                            with subscribers_lock:
-                                mu = _load_muted_users()
-                                mu.discard(target_id)
-                                _save_muted_users(mu)
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": f"🔔 تم تفعيل إشعارات المستخدم {target_id} بنجاح."})
-                            send_telegram_monitored(target_id, "🔔 تم إعادة تفعيل إشعاراتك بواسطة الأدمن!")
-                        except ValueError:
-                            requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ ID غير صالح"})
-                    else:
-                        requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "استخدم: /unmute <id>"})
+                    if len(parts) < 2:
+                        send_telegram_monitored(chat_id, "استخدم: /unmute <id>")
+                        continue
+                    target_id = parts[1].strip()
+                    try:
+                        target_id = int(target_id)
+                    except:
+                        send_telegram_monitored(chat_id, "⚠️ ID غير صالح")
+                        continue
+                    # Remove from permanent muted
+                    mu = _load_muted_users()
+                    mu.discard(target_id)
+                    _save_muted_users(mu)
+                    # Remove from temporary mutes as well
+                    temp_mutes = _load_temp_mutes()
+                    if str(target_id) in temp_mutes:
+                        del temp_mutes[str(target_id)]
+                        _save_temp_mutes(temp_mutes)
+                    send_telegram_monitored(chat_id, f"🔔 تم تفعيل إشعارات المستخدم {target_id}.")
+                    send_telegram_monitored(target_id, "🔔 تم إعادة تفعيل إشعاراتك.")
                 elif cmd == "/muteall":
                     with subscribers_lock:
                         subs = _load_subscribers()
@@ -2136,13 +2194,15 @@ def handle_updates_loop(poll_interval=2):
                         for s in subs:
                             mu.add(s)
                         _save_muted_users(mu)
-                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔕 تم كتم إشعارات جميع المشتركين بنجاح."})
+                    send_telegram_monitored(chat_id, "🔕 تم كتم إشعارات جميع المشتركين.")
                 elif cmd == "/unmuteall":
                     with subscribers_lock:
                         mu = _load_muted_users()
                         mu.clear()
                         _save_muted_users(mu)
-                    requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔔 تم إعادة تفعيل الإشعارات لجميع المشتركين بنجاح."})
+                        # Also clear temp mutes
+                        _save_temp_mutes({})
+                    send_telegram_monitored(chat_id, "🔔 تم إعادة تفعيل الإشعارات لجميع المشتركين.")
                 elif cmd == "/broadcast":
                     broadcast_msg = text[len("/broadcast"):].strip()
                     if broadcast_msg:
@@ -2223,6 +2283,11 @@ def handle_updates_loop(poll_interval=2):
                     mu = _load_muted_users()
                     mu.discard(chat_id)
                     _save_muted_users(mu)
+                    # Also remove from temp mutes
+                    temp_mutes = _load_temp_mutes()
+                    if str(chat_id) in temp_mutes:
+                        del temp_mutes[str(chat_id)]
+                        _save_temp_mutes(temp_mutes)
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "🔔 تم إعادة تفعيل إشعاراتك!"})
                 elif cmd == "/backup":
                     try:
@@ -2363,7 +2428,70 @@ def handle_updates_loop(poll_interval=2):
                             del neg_map[str(chat_id)]
                             _save_neg_keywords(neg_map)
                     requests.post(f"{base_url}/sendMessage", json={"chat_id": chat_id, "text": "✅ تم مسح جميع الكلمات السلبية. ستصلك الآن جميع الطلبات (بدون استثناء)."})
-                # End of negative filter commands
+                # NEW: Budget filter commands
+                elif cmd == "/budget_min":
+                    parts = text.split()
+                    if len(parts) != 2 or not parts[1].replace('.', '').isdigit():
+                        send_telegram_monitored(chat_id, "⚠️ استخدم: `/budget_min 500`", parse_mode="Markdown")
+                        continue
+                    min_budget = float(parts[1])
+                    filters = _load_budget_filters()
+                    filters[str(chat_id)] = min_budget
+                    _save_budget_filters(filters)
+                    send_telegram_monitored(chat_id, f"💰 تم التفعيل: هتوصلك بس الطلبات اللي ميزانيتها {min_budget} ريال فأكثر.\nلإلغاء الفلتر: `/budget_clear`", parse_mode="Markdown")
+                elif cmd == "/budget_clear":
+                    filters = _load_budget_filters()
+                    if str(chat_id) in filters:
+                        del filters[str(chat_id)]
+                        _save_budget_filters(filters)
+                        send_telegram_monitored(chat_id, "✅ تم إلغاء فلتر السعر، هتوصلك كل الطلبات تاني.")
+                    else:
+                        send_telegram_monitored(chat_id, "⚠️ ما كنتش مفعل فلتر سعر.")
+                # NEW: Search command
+                elif cmd == "/search":
+                    keyword = text[len("/search"):].strip().lower()
+                    if not keyword:
+                        send_telegram_monitored(chat_id, "⭐️ استخدم: `/search <كلمة>`", parse_mode="Markdown")
+                        continue
+                    old_projects = _load_old_projects()
+                    matches = []
+                    for proj in old_projects:
+                        if keyword in proj['title'].lower() or keyword in proj.get('desc', '').lower():
+                            matches.append(proj)
+                    if not matches:
+                        send_telegram_monitored(chat_id, f"🔍 مفيش طلبات قديمة فيها كلمة '{keyword}'")
+                    else:
+                        lines = [f"🔎 نتائج البحث عن '{keyword}':\n"]
+                        for m in matches[:10]:
+                            lines.append(f"• {m['title'][:60]}\n{m['link']}")
+                        send_telegram_monitored(chat_id, "\n".join(lines))
+                # NEW: Proxy speed test
+                elif cmd == "/proxy_test":
+                    if role < 2:
+                        send_telegram_monitored(chat_id, "هنهذر ولا اي")
+                        continue
+                    send_telegram_monitored(chat_id, "⏳ جاري اختبار سرعة البروكسيات...")
+                    all_proxies = list(premium_proxies) + list(free_proxies)
+                    results = []
+                    for scheme, addr in all_proxies[:30]:
+                        if PROXY_USER and PROXY_PASS and (scheme, addr) in premium_proxies:
+                            pu = f"{scheme}://{PROXY_USER}:{PROXY_PASS}@{addr}"
+                        else:
+                            pu = f"{scheme}://{addr}"
+                        proxy_dict = {"http": pu, "https": pu}
+                        latency = test_proxy_speed(proxy_dict)
+                        if latency:
+                            results.append((latency, addr))
+                        time.sleep(0.5)
+                    if not results:
+                        send_telegram_monitored(chat_id, "❌ مفيش بروكسيات شغالة أو كلهم بطيئين.")
+                    else:
+                        results.sort()
+                        lines = ["🚀 أسرع 5 بروكسيات:\n"]
+                        for lat, addr in results[:5]:
+                            lines.append(f"• {addr} - {lat:.2f} ثانية")
+                        send_telegram_monitored(chat_id, "\n".join(lines))
+                # End of new commands
                 elif cmd == "/help":
                     if role >= 3:
                         help_text = (
@@ -2385,7 +2513,7 @@ def handle_updates_loop(poll_interval=2):
                             "  /pending — عرض قائمة طلبات الاشتراك المعلقة\n"
                             "  /block <id> — حظر مستخدم من استخدام البوت\n"
                             "  /unblock <id> — إلغاء حظر مستخدم محظور\n"
-                            "  /mute <id> — كتم إشعارات مستخدم معين بقوة\n"
+                            "  /mute <id> [مدة] — كتم إشعارات مستخدم معين (مدة اختيارية: 30m, 2h, 1d)\n"
                             "  /unmute <id> — إلغاء كتم إشعارات مستخدم معين\n"
                             "  /muteall — كتم إشعارات جميع المشتركين بقوة\n"
                             "  /unmuteall — إلغاء كتم إشعارات جميع المشتركين\n"
@@ -2396,7 +2524,11 @@ def handle_updates_loop(poll_interval=2):
                             "  /restore — استعادة البيانات بالرد (Reply) على ملف الباك أب\n"
                             "  /negfilter كلمة1, كلمة2 — استبعاد المشاريع التي تحتوي على هذه الكلمات\n"
                             "  /mynegfilters — عرض الكلمات السلبية الحالية\n"
-                            "  /negfilter_clear — مسح جميع الكلمات السلبية\n\n"
+                            "  /negfilter_clear — مسح جميع الكلمات السلبية\n"
+                            "  /budget_min <رقم> — فلتر السعر (ميزانية >= الرقم)\n"
+                            "  /budget_clear — إلغاء فلتر السعر\n"
+                            "  /search <كلمة> — البحث في آخر 200 طلب\n"
+                            "  /proxy_test — اختبار سرعة البروكسيات\n\n"
                             "👤 **👤 أوامر المشتركين (General User Commands):**\n"
                             "  /start أو /subscribe — طلب اشتراك في إشعارات البوت\n"
                             "  /mymute أو /pause — كتم إشعارات الطلبات لحسابك مؤقتاً\n"
@@ -2423,7 +2555,7 @@ def handle_updates_loop(poll_interval=2):
                             "  /pending — عرض قائمة طلبات الاشتراك المعلقة\n"
                             "  /block <id> — حظر مستخدم من استخدام البوت\n"
                             "  /unblock <id> — إلغاء حظر مستخدم محظور\n"
-                            "  /mute <id> — كتم إشعارات مستخدم معين بقوة\n"
+                            "  /mute <id> [مدة] — كتم إشعارات مستخدم معين (مدة اختيارية: 30m, 2h, 1d)\n"
                             "  /unmute <id> — إلغاء كتم إشعارات مستخدم معين\n"
                             "  /muteall — كتم إشعارات جميع المشتركين بقوة\n"
                             "  /unmuteall — إلغاء كتم إشعارات جميع المشتركين\n"
@@ -2434,7 +2566,11 @@ def handle_updates_loop(poll_interval=2):
                             "  /restore — استعادة البيانات بالرد (Reply) على ملف الباك أب\n"
                             "  /negfilter كلمة1, كلمة2 — استبعاد المشاريع التي تحتوي على هذه الكلمات\n"
                             "  /mynegfilters — عرض الكلمات السلبية الحالية\n"
-                            "  /negfilter_clear — مسح جميع الكلمات السلبية\n\n"
+                            "  /negfilter_clear — مسح جميع الكلمات السلبية\n"
+                            "  /budget_min <رقم> — فلتر السعر\n"
+                            "  /budget_clear — إلغاء فلتر السعر\n"
+                            "  /search <كلمة> — البحث في الطلبات القديمة\n"
+                            "  /proxy_test — اختبار سرعة البروكسيات\n\n"
                             "👤 **👤 أوامر المشتركين (General User Commands):**\n"
                             "  /start أو /subscribe — طلب اشتراك في إشعارات البوت\n"
                             "  /mymute أو /pause — كتم إشعارات الطلبات لحسابك مؤقتاً\n"
