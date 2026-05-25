@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# System dependencies المطلوبة لـ Playwright
+# تثبيت dependencies المطلوبة لـ Playwright
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -29,11 +29,13 @@ RUN apt-get update && apt-get install -y \
     libvulkan1 \
     && rm -rf /var/lib/apt/lists/*
 
-# تثبيت Python dependencies
+# نسخ requirements
 COPY requirements.txt .
+
+# تثبيت مكتبات Python
 RUN pip install --no-cache-dir -r requirements.txt
 
-# تثبيت متصفحات Playwright أثناء build
+# تثبيت Chromium الخاص بـ Playwright
 RUN playwright install --with-deps chromium
 
 # نسخ ملفات المشروع
