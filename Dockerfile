@@ -2,7 +2,7 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# تثبيت dependencies النظام لتشغيل المتصفحات
+# تثبيت dependencies النظام
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -10,13 +10,12 @@ RUN apt-get update && apt-get install -y \
 
 # تثبيت مكتبات Python
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt && \
-    playwright install chromium && \
-    playwright install-deps
+RUN pip install --no-cache-dir -r requirements.txt
 
-# تحديد مسار ثابت للمتصفحات (يمنع حذفها من Railway)
-ENV PLAYWRIGHT_BROWSERS_PATH=/app/ms-playwright
-
+# نسخ باقي الملفات
 COPY . .
 
-CMD ["python", "5.py"]
+# إنشاء سكربت بدء التشغيل الذي يقوم بتثبيت المتصفحات ثم تشغيل البوت
+RUN echo '#!/bin/bash\necho "Installing Playwright browsers..."\nplaywright install chromium\necho "Browsers installed. Starting bot..."\npython 5.py' > start.sh && chmod +x start.sh
+
+CMD ["./start.sh"]
